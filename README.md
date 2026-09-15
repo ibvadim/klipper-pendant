@@ -45,6 +45,8 @@ before soldering, and never apply 5 V to the OpenNextion GPIO inputs.
 
 ## Hardware at a glance
 
+<img width="512" height="512" alt="pendant_loop_24fps_readme_optimized" src="https://github.com/user-attachments/assets/af7ac6af-65a5-4d59-9986-7a4e42f39830" />
+
 | Part | Choice used by this project |
 | --- | --- |
 | Display/controller | OpenNextion ONX3248G035 (ESP32-S3R8, 16 MiB flash, 8 MiB PSRAM) |
