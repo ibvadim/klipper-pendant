@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Install Klipper Pendant</title>
+  <script type="module" src="https://unpkg.com/esp-web-tools@10/dist/web/install-button.js?module"></script>
+  <style>
+    :root { color-scheme: dark; font-family: system-ui, sans-serif; background: #161b22; color: #e6edf3; }
+    body { max-width: 42rem; margin: 4rem auto; padding: 0 1.25rem; line-height: 1.55; }
+    h1 { line-height: 1.15; }
+    .card { padding: 1.25rem; background: #21262d; border-radius: .75rem; }
+    esp-web-install-button { --esp-tools-button-color: #238636; --esp-tools-button-text-color: #fff; }
+    code { background: #30363d; padding: .15rem .3rem; border-radius: .2rem; }
+  </style>
+</head>
+<body>
+  <h1>Install Klipper Pendant</h1>
+  <p>Install the latest stable firmware on an OpenNextion ONX3248G035.</p>
+  <div class="card">
+    <ol>
+      <li>Use Chrome or Edge on a desktop computer.</li>
+      <li>Connect the display with a USB <strong>data</strong> cable.</li>
+      <li>Click <strong>Connect</strong>, select the display's USB port, then confirm installation.</li>
+    </ol>
+    <esp-web-install-button manifest="manifest.json">
+      <button slot="activate">Connect and install</button>
+      <span slot="unsupported">Use Chrome or Edge on a desktop computer to install firmware.</span>
+      <span slot="not-allowed">This installer must be opened over HTTPS.</span>
+    </esp-web-install-button>
+  </div>
+  <p><strong>Warning:</strong> first-time installation replaces the factory firmware. Do not disconnect the USB cable while installation is running.</p>
+  <p>After the display restarts, configure Wi-Fi and Moonraker in <strong>Settings</strong>. The E-STOP control is a network request, not a hard-wired emergency stop.</p>
+  <p>Need help or a manual installation method? See the <a href="https://github.com/ibvadim/klipper-pendant/blob/main/docs/firmware.md">firmware guide</a>.</p>
+</body>
+</html>

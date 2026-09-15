@@ -1,0 +1,12 @@
+# Local vendor references and toolchains
+.vendor/
+.tools/
+
+# ESP-IDF build output
+build/
+firmware/build/
+sdkconfig.old
+
+# Device backups are local artifacts and may contain stored credentials
+artifacts/*.bin
+

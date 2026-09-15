@@ -1,0 +1,79 @@
+name: Release firmware
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    container: espressif/idf:v5.4.1
+    steps:
+      - uses: actions/checkout@v4
+      - name: Detect locally published release
+        id: local_release
+        shell: bash
+        run: |
+          if git for-each-ref --format='%(contents)' "refs/tags/${GITHUB_REF_NAME}" | grep -Fxq '[local-release]'; then
+            echo 'skip=true' >> "$GITHUB_OUTPUT"
+          fi
+      - name: Build OTA image
+        if: steps.local_release.outputs.skip != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          printf '%s\n' "$version" > firmware/version.txt
+          . /opt/esp/idf/export.sh
+          idf.py -C firmware build
+          cp firmware/build/klipper-pendant.bin klipper-pendant-onx3248g035.bin
+          esptool.py --chip esp32s3 merge_bin \
+            --output klipper-pendant-onx3248g035-install.bin \
+            --flash_mode dio \
+            --flash_freq 80m \
+            --flash_size 16MB \
+            0x0 firmware/build/bootloader/bootloader.bin \
+            0x8000 firmware/build/partition_table/partition-table.bin \
+            0xf000 firmware/build/ota_data_initial.bin \
+            0x20000 firmware/build/klipper-pendant.bin
+          sha256sum klipper-pendant-onx3248g035.bin | awk '{print $1}' > firmware.sha256
+          sha256sum klipper-pendant-onx3248g035-install.bin | awk '{print $1}' > installer.sha256
+          sha256="$(cat firmware.sha256)"
+          cat > manifest.json <<EOF
+          {"format":1,"board":"onx3248g035","version":"${version}","url":"https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/klipper-pendant-onx3248g035.bin","sha256":"${sha256}"}
+          EOF
+      # A release becomes "latest" as soon as it is public.  Upload assets to
+      # a draft first, otherwise pendants can fetch the release in the small
+      # window before manifest.json has been attached.
+      - name: Upload OTA assets to a draft release
+        if: steps.local_release.outputs.skip != 'true'
+        id: upload_release
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          generate_release_notes: true
+          files: |
+            klipper-pendant-onx3248g035.bin
+            klipper-pendant-onx3248g035-install.bin
+            firmware.sha256
+            installer.sha256
+            manifest.json
+      - name: Publish verified release
+        if: steps.local_release.outputs.skip != 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const releaseId = Number('${{ steps.upload_release.outputs.id }}');
+            if (!Number.isInteger(releaseId)) {
+              core.setFailed('Draft release ID was not returned by action-gh-release');
+              return;
+            }
+            await github.rest.repos.updateRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              release_id: releaseId,
+              draft: false,
+            });
