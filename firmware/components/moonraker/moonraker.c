@@ -10,7 +10,6 @@
 #include "cJSON.h"
 #include "esp_event.h"
 #include "esp_check.h"
-#include "esp_http_client.h"
 #include "esp_log.h"
 #include "esp_heap_caps.h"
 #include "esp_timer.h"
@@ -1403,18 +1402,6 @@ static bool build_uri(const settings_printer_t *config, char *uri, size_t uri_si
     return result > 0 && (size_t)result < uri_size;
 }
 
-static bool build_emergency_stop_uri(const settings_printer_t *config, char *uri, size_t uri_size)
-{
-    char websocket_uri[sizeof(active_uri)];
-    if (!build_uri(config, websocket_uri, sizeof(websocket_uri))) return false;
-    const char *endpoint = websocket_uri + strlen("ws://");
-    const char *path = strstr(endpoint, "/websocket");
-    if (path == NULL) return false;
-    int result = snprintf(uri, uri_size, "http://%.*s/printer/emergency_stop",
-                          (int)(path - endpoint), endpoint);
-    return result > 0 && (size_t)result < uri_size;
-}
-
 static bool active_configuration_matches(const settings_printer_t *config)
 {
     char uri[sizeof(active_uri)];
@@ -1986,35 +1973,14 @@ esp_err_t moonraker_print_cancel(void) { return send_print_command("printer.prin
 
 esp_err_t moonraker_emergency_stop(void)
 {
-    settings_printer_t config;
-    ESP_RETURN_ON_ERROR(settings_get_printer(&config), TAG, "read printer configuration");
-    if (!settings_printer_is_valid(&config) || !config.enabled) return ESP_ERR_INVALID_STATE;
-
-    char uri[128];
-    if (!build_emergency_stop_uri(&config, uri, sizeof(uri))) return ESP_ERR_INVALID_ARG;
-
-    esp_http_client_config_t http_config = {
-        .url = uri,
-        .method = HTTP_METHOD_POST,
-        .timeout_ms = 3000,
-        .buffer_size = 256,
-        .buffer_size_tx = 256,
-    };
-    esp_http_client_handle_t client = esp_http_client_init(&http_config);
-    if (client == NULL) return ESP_ERR_NO_MEM;
-
-    esp_err_t result = esp_http_client_perform(client);
-    const int status_code = esp_http_client_get_status_code(client);
-    esp_http_client_cleanup(client);
-    if (result != ESP_OK) {
-        ESP_LOGW(TAG, "emergency-stop HTTP request failed: %s", esp_err_to_name(result));
-        return result;
+    /* Reuse the established Moonraker WebSocket.  Opening a second TCP
+     * connection for the REST endpoint can starve the ESP32 Wi-Fi transport
+     * while it is servicing the status socket, causing an E-STOP timeout. */
+    if (send_rpc("printer.emergency_stop", "{}") < 0) {
+        ESP_LOGW(TAG, "emergency-stop unavailable: Moonraker WebSocket is disconnected");
+        return ESP_ERR_INVALID_STATE;
     }
-    if (status_code < 200 || status_code >= 300) {
-        ESP_LOGW(TAG, "emergency-stop HTTP request returned %d", status_code);
-        return ESP_FAIL;
-    }
-    ESP_LOGW(TAG, "emergency-stop request accepted");
+    ESP_LOGW(TAG, "emergency-stop request sent");
     return ESP_OK;
 }
 
