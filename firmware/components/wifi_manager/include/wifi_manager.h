@@ -19,6 +19,7 @@ typedef struct {
     int8_t rssi;
     char ip[16];
     bool scanning;
+    uint32_t generation;
 } wifi_manager_status_t;
 
 typedef struct {

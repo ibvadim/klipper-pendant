@@ -46,7 +46,6 @@ typedef enum {
     PAGE_NETWORK_SETUP,
     PAGE_PRINTER_SETUP,
     PAGE_DIAGNOSTICS,
-    PAGE_BATTERY,
     PAGE_FIRMWARE,
     PAGE_BUTTON_MAPPING,
 } page_t;
@@ -101,7 +100,6 @@ static QueueHandle_t input_event_queue;
 static bool command_feedback_visible;
 static lv_obj_t *bottom_navigation[5];
 static lv_obj_t *diagnostics_label;
-static lv_obj_t *battery_debug_label;
 static lv_obj_t *editor_overlay;
 static lv_obj_t *editor_textarea;
 static lv_obj_t *editor_error_label;
@@ -224,6 +222,7 @@ static int32_t move_extruder_speed_mm_s = 5;
 static ota_update_state_t firmware_state_seen = OTA_UPDATE_IDLE;
 static uint8_t firmware_progress_seen;
 static printer_connection_t navigation_connection_seen = PRINTER_CONNECTION_UNCONFIGURED;
+static uint32_t wifi_generation_seen;
 
 static void navigate_to(page_t page);
 static bool page_requires_online_printer(page_t page);
@@ -397,7 +396,6 @@ static page_t parent_page(page_t page)
     case PAGE_NETWORK_SETUP:
     case PAGE_PRINTER_LIST:
     case PAGE_DIAGNOSTICS:
-    case PAGE_BATTERY:
     case PAGE_FIRMWARE:
     case PAGE_BUTTON_MAPPING:
         return PAGE_SETTINGS;
@@ -771,12 +769,6 @@ static bool page_requires_online_printer(page_t page)
            page == PAGE_START_PRINT;
 }
 
-static void scan_refresh_timer_cb(lv_timer_t *timer)
-{
-    (void)timer;
-    if (current_page == PAGE_NETWORK_SETUP) navigate_to(PAGE_NETWORK_SETUP);
-}
-
 static void load_editable_settings(void)
 {
     settings_get_wifi(&editable_wifi);
@@ -788,30 +780,18 @@ static void refresh_diagnostics(void)
     if (diagnostics_label == NULL) return;
     board_battery_status_t status;
     board_battery_get_status(&status);
-    if (!status.valid) {
-        lv_label_set_text(diagnostics_label, "LCD: ST7796U  320 x 480\nTouch: CST826 ready\nPSRAM: 8 MiB verified\nBattery: ADC unavailable\nInputs: EC11 / Back / E-STOP ready");
-    } else if (!status.present) {
-        lv_label_set_text(diagnostics_label, "LCD: ST7796U  320 x 480\nTouch: CST826 ready\nPSRAM: 8 MiB verified\nBattery: no battery attached\nInputs: EC11 / Back / E-STOP ready");
-    } else {
-        lv_label_set_text_fmt(diagnostics_label, "LCD: ST7796U  320 x 480\nTouch: CST826 ready\nPSRAM: 8 MiB verified\nBattery: %u.%02u V, %u%%%s\nInputs: EC11 / Back / E-STOP ready",
-                              status.voltage_mv / 1000, (status.voltage_mv % 1000) / 10, status.percent,
-                              status.charge_state == BOARD_BATTERY_CHARGING ? ", charging" : "");
-    }
-}
-
-static void refresh_battery_debug(void)
-{
-    if (battery_debug_label == NULL) return;
-
-    board_battery_status_t status;
-    board_battery_get_status(&status);
     const char *state = status.charge_state == BOARD_BATTERY_CHARGING ? "Charging (USB)" :
                         status.charge_state == BOARD_BATTERY_DISCHARGING ? "Discharging" : "Unavailable";
     if (!status.valid) {
-        lv_label_set_text(battery_debug_label, "ADC: unavailable\n\nCheck BAT connector and GPIO4 ADC.");
+        lv_label_set_text(diagnostics_label,
+                          "LCD: ST7796U  320 x 480\nTouch: CST826 ready\nPSRAM: 8 MiB verified\n"
+                          "Inputs: EC11 / Back / E-STOP ready\n\nBATTERY\nADC: unavailable\n\n"
+                          "Check BAT connector and GPIO4 ADC.");
         return;
     }
-    lv_label_set_text_fmt(battery_debug_label,
+    lv_label_set_text_fmt(diagnostics_label,
+                          "LCD: ST7796U  320 x 480\nTouch: CST826 ready\nPSRAM: 8 MiB verified\n"
+                          "Inputs: EC11 / Back / E-STOP ready\n\nBATTERY\n"
                           "Voltage     %u.%03u V\n"
                           "Estimated   %u%%\n"
                           "State       %s\n"
@@ -856,6 +836,11 @@ static void battery_timer_cb(lv_timer_t *timer)
     }
     wifi_manager_status_t wifi;
     wifi_manager_get_status(&wifi);
+    if (current_page == PAGE_NETWORK_SETUP && wifi.generation != wifi_generation_seen) {
+        wifi_generation_seen = wifi.generation;
+        navigate_to(PAGE_NETWORK_SETUP);
+        return;
+    }
     if (wifi.state == WIFI_MANAGER_CONNECTED) {
         /* RSSI is useful for diagnostics but not as a persistent header value.
          * The three bars keep the signal readable at a glance. */
@@ -976,14 +961,12 @@ static void battery_timer_cb(lv_timer_t *timer)
         lv_label_set_text(battery_label, LV_SYMBOL_BATTERY_EMPTY " --");
         lv_obj_set_style_text_color(battery_label, ui_kit_tone_color(UI_TONE_DANGER), LV_PART_MAIN);
         refresh_diagnostics();
-        refresh_battery_debug();
         return;
     }
     if (!status.present) {
         lv_label_set_text(battery_label, LV_SYMBOL_BATTERY_EMPTY " --");
         lv_obj_set_style_text_color(battery_label, ui_kit_tone_color(UI_TONE_MUTED), LV_PART_MAIN);
         refresh_diagnostics();
-        refresh_battery_debug();
         return;
     }
     lv_label_set_text_fmt(battery_label, "%s %u%%%s",
@@ -998,48 +981,87 @@ static void battery_timer_cb(lv_timer_t *timer)
         LV_PART_MAIN);
     }
     refresh_diagnostics();
-    refresh_battery_debug();
 }
 
 static lv_obj_t *add_nav_row(const char *title, const char *value, ui_tone_t tone,
                              bool enabled, lv_event_cb_t callback, void *user_data)
 {
-    const ui_row_spec_t spec = {
+    /* Compatibility wrapper for simple one-line controls.  Non-interactive
+     * content is now information, never a disabled button. */
+    const ui_item_spec_t spec = {
         .title = title,
         .subtitle = NULL,
         .value = value,
         .tone = tone,
-        .enabled = enabled,
+        .kind = enabled ? UI_ITEM_ACTION : UI_ITEM_INFO,
     };
-    return ui_kit_create_row(page_body, navigation_group, &spec, callback, user_data);
+    return ui_kit_create_item(page_body, navigation_group, &spec, callback, user_data);
+}
+
+static lv_obj_t *add_nav_info_row(const char *title, const char *value, const char *subtitle,
+                                  ui_tone_t tone)
+{
+    const ui_item_spec_t spec = {
+        .title = title, .subtitle = subtitle, .value = value, .tone = tone,
+        .kind = UI_ITEM_INFO,
+    };
+    return ui_kit_create_item(page_body, navigation_group, &spec, NULL, NULL);
+}
+
+static lv_obj_t *add_inline_control(const char *title, const char *value, ui_tone_t tone,
+                                    bool available, lv_event_cb_t callback, void *user_data)
+{
+    const ui_item_spec_t spec = {
+        .title = title, .subtitle = NULL, .value = value, .tone = tone,
+        .kind = available ? UI_ITEM_INLINE : UI_ITEM_UNAVAILABLE,
+    };
+    return ui_kit_create_item(page_body, navigation_group, &spec, callback, user_data);
+}
+
+static lv_obj_t *add_navigation_row(const char *title, const char *value,
+                                    lv_event_cb_t callback, void *user_data)
+{
+    (void)value;
+    const ui_item_spec_t spec = {
+        .title = title, .subtitle = NULL, .value = NULL, .tone = UI_TONE_DEFAULT,
+        .kind = UI_ITEM_NAVIGATION,
+    };
+    return ui_kit_create_item(page_body, navigation_group, &spec, callback, user_data);
+}
+
+static lv_obj_t *add_commit_action(const char *title, lv_event_cb_t callback, void *user_data)
+{
+    return add_nav_row(title, NULL, UI_TONE_SUCCESS, true, callback, user_data);
 }
 
 static lv_obj_t *add_nav_card(const char *title, const char *subtitle,
                               const char *value, ui_tone_t tone,
                               lv_event_cb_t callback, void *user_data)
 {
-    const ui_row_spec_t spec = {
+    (void)value;
+    const ui_item_spec_t spec = {
         .title = title,
         .subtitle = subtitle,
-        .value = value,
+        .value = NULL,
         .tone = tone,
-        .enabled = true,
+        .kind = UI_ITEM_NAVIGATION,
     };
-    return ui_kit_create_row(page_body, navigation_group, &spec, callback, user_data);
+    return ui_kit_create_item(page_body, navigation_group, &spec, callback, user_data);
 }
 
 static lv_obj_t *add_nav_wrapped_card(const char *title, const char *subtitle,
                                       const char *value, ui_tone_t tone,
                                       lv_event_cb_t callback, void *user_data)
 {
-    const ui_row_spec_t spec = {
+    (void)value;
+    const ui_item_spec_t spec = {
         .title = title,
         .subtitle = subtitle,
-        .value = value,
+        .value = NULL,
         .tone = tone,
-        .enabled = true,
+        .kind = UI_ITEM_NAVIGATION,
     };
-    return ui_kit_create_wrapped_row(page_body, navigation_group, &spec, callback, user_data);
+    return ui_kit_create_wrapped_item(page_body, navigation_group, &spec, callback, user_data);
 }
 
 static lv_obj_t *add_nav_button(const char *text, lv_event_cb_t callback, void *user_data)
@@ -1052,34 +1074,30 @@ static lv_obj_t *add_nav_button(const char *text, lv_event_cb_t callback, void *
 static lv_obj_t *add_nav_hold_row(const char *title, const char *value, ui_tone_t tone,
                                   lv_event_cb_t callback, void *user_data)
 {
-    lv_obj_t *row = add_nav_row(title, value, tone, true, NULL, NULL);
-    /* HOLD is deliberately short: give the action name the unused space so
-     * labels such as "Firmware restart" stay fully readable on 320 px. */
-    if (row != NULL) {
-        lv_obj_t *title_label = lv_obj_get_child(row, 0);
-        lv_obj_t *value_label = lv_obj_get_child(row, 1);
-        if (title_label != NULL) lv_obj_set_width(title_label, LV_PCT(70));
-        if (value_label != NULL) lv_obj_set_width(value_label, LV_PCT(27));
-    }
+    (void)value;
+    const ui_item_spec_t spec = {
+        .title = title, .subtitle = NULL, .value = NULL, .tone = tone,
+        .kind = UI_ITEM_HOLD_ACTION,
+    };
+    lv_obj_t *row = ui_kit_create_item(page_body, navigation_group, &spec, NULL, NULL);
     if (row != NULL && callback != NULL) {
         lv_obj_add_event_cb(row, callback, LV_EVENT_LONG_PRESSED, user_data);
     }
     return row;
 }
 
-/* Long macro names are user-provided and must remain readable.  A wrapped
- * card also avoids the trailing HOLD affordance taking space from the name. */
+/* Long macro names are user-provided and must remain readable. */
 static lv_obj_t *add_nav_wrapped_hold_card(const char *title, ui_tone_t tone,
                                            lv_event_cb_t callback, void *user_data)
 {
-    const ui_row_spec_t spec = {
+    const ui_item_spec_t spec = {
         .title = title,
         .subtitle = NULL,
         .value = NULL,
         .tone = tone,
-        .enabled = true,
+        .kind = UI_ITEM_HOLD_ACTION,
     };
-    lv_obj_t *row = ui_kit_create_wrapped_row(page_body, navigation_group, &spec, NULL, NULL);
+    lv_obj_t *row = ui_kit_create_wrapped_item(page_body, navigation_group, &spec, NULL, NULL);
     if (row != NULL && callback != NULL) {
         lv_obj_add_event_cb(row, callback, LV_EVENT_LONG_PRESSED, user_data);
     }
@@ -1089,28 +1107,10 @@ static lv_obj_t *add_nav_wrapped_hold_card(const char *title, ui_tone_t tone,
 static void add_print_action(lv_obj_t *parent, lv_align_t align, const char *label_text,
                              ui_tone_t tone, lv_event_cb_t callback)
 {
-    lv_obj_t *action = lv_btn_create(parent);
-    lv_obj_set_size(action, 146, 42);
+    lv_obj_t *action = ui_kit_create_compact_hold_action(parent, navigation_group, 146, 42,
+                                                          label_text, tone, callback);
+    if (action == NULL) return;
     lv_obj_align(action, align, 0, 0);
-    lv_obj_set_style_bg_color(action, ui_kit_color(UI_COLOR_SURFACE), LV_PART_MAIN);
-    lv_obj_set_style_border_color(action, ui_kit_tone_color(tone), LV_PART_MAIN);
-    lv_obj_set_style_border_width(action, 1, LV_PART_MAIN);
-    lv_obj_set_style_border_color(action, ui_kit_color(UI_COLOR_BORDER_FOCUSED),
-                                  LV_PART_MAIN | LV_STATE_FOCUSED);
-    lv_obj_set_style_border_width(action, 3, LV_PART_MAIN | LV_STATE_FOCUSED);
-    lv_obj_set_style_outline_color(action, ui_kit_color(UI_COLOR_BORDER_FOCUSED),
-                                   LV_PART_MAIN | LV_STATE_FOCUSED);
-    lv_obj_set_style_outline_width(action, 2, LV_PART_MAIN | LV_STATE_FOCUSED);
-    lv_obj_set_style_radius(action, 6, LV_PART_MAIN);
-    lv_obj_add_event_cb(action, touch_focus_event, LV_EVENT_PRESSED, NULL);
-    lv_obj_add_event_cb(action, callback, LV_EVENT_LONG_PRESSED, NULL);
-    lv_group_add_obj(navigation_group, action);
-
-    lv_obj_t *label = lv_label_create(action);
-    lv_label_set_text(label, label_text);
-    lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
-    lv_obj_set_style_text_color(label, ui_kit_tone_color(tone), LV_PART_MAIN);
-    lv_obj_center(label);
 }
 
 static void refresh_pause_action(const printer_state_t *printer)
@@ -1119,9 +1119,8 @@ static void refresh_pause_action(const printer_state_t *printer)
 
     const bool paused = printer->job_state == PRINTER_JOB_PAUSED;
     const ui_tone_t tone = paused ? UI_TONE_SUCCESS : UI_TONE_ACCENT;
-    lv_label_set_text(monitor_pause_action_label,
-                      paused ? "Resume print" : "Pause print");
-    lv_obj_set_style_border_color(monitor_pause_action, ui_kit_tone_color(tone), LV_PART_MAIN);
+    lv_label_set_text_fmt(monitor_pause_action_label, "%s " LV_SYMBOL_PLAY,
+                          paused ? "Resume print" : "Pause print");
     lv_obj_set_style_text_color(monitor_pause_action_label, ui_kit_tone_color(tone), LV_PART_MAIN);
     lv_obj_center(monitor_pause_action_label);
 }
@@ -1794,17 +1793,13 @@ static void open_editor(edit_field_t field)
     lv_obj_set_style_bg_color(keyboard, ui_kit_color(UI_COLOR_SURFACE_FOCUSED), LV_PART_ITEMS | LV_STATE_PRESSED);
     lv_obj_set_style_border_color(keyboard, ui_kit_color(UI_COLOR_BORDER), LV_PART_ITEMS);
     lv_obj_set_style_text_color(keyboard, ui_kit_color(UI_COLOR_TEXT_PRIMARY), LV_PART_ITEMS);
-    if (field == EDIT_PRINTER_PORT) lv_keyboard_set_mode(keyboard, LV_KEYBOARD_MODE_NUMBER);
-    if (field == EDIT_CONSOLE_COMMAND || field == EDIT_LEFT_BUTTON_GCODE || field == EDIT_RIGHT_BUTTON_GCODE) {
-        lv_keyboard_set_map(keyboard, LV_KEYBOARD_MODE_TEXT_LOWER, console_kb_lower, console_kb_ctrl);
-        lv_keyboard_set_map(keyboard, LV_KEYBOARD_MODE_TEXT_UPPER, console_kb_upper, console_kb_ctrl);
-        lv_keyboard_set_map(keyboard, LV_KEYBOARD_MODE_SPECIAL, console_kb_special, console_kb_ctrl);
-        lv_keyboard_set_mode(keyboard, LV_KEYBOARD_MODE_TEXT_LOWER);
-    }
+    /* All editors use Console's complete keyboard, including host and port. */
+    lv_keyboard_set_map(keyboard, LV_KEYBOARD_MODE_TEXT_LOWER, console_kb_lower, console_kb_ctrl);
+    lv_keyboard_set_map(keyboard, LV_KEYBOARD_MODE_TEXT_UPPER, console_kb_upper, console_kb_ctrl);
+    lv_keyboard_set_map(keyboard, LV_KEYBOARD_MODE_SPECIAL, console_kb_special, console_kb_ctrl);
+    lv_keyboard_set_mode(keyboard, LV_KEYBOARD_MODE_TEXT_LOWER);
     lv_keyboard_set_textarea(keyboard, editor_textarea);
     lv_obj_add_event_cb(keyboard, keyboard_layout_event, LV_EVENT_VALUE_CHANGED, NULL);
-    if (field != EDIT_CONSOLE_COMMAND && field != EDIT_LEFT_BUTTON_GCODE && field != EDIT_RIGHT_BUTTON_GCODE)
-        hide_keyboard_close_key(keyboard);
     lv_group_focus_obj(keyboard);
 }
 
@@ -1823,10 +1818,7 @@ static void save_network_event(lv_event_t *event)
 static void scan_networks_event(lv_event_t *event)
 {
     (void)event;
-    if (wifi_manager_scan_start() == ESP_OK) {
-        lv_timer_t *timer = lv_timer_create(scan_refresh_timer_cb, 2500, NULL);
-        lv_timer_set_repeat_count(timer, 1);
-    }
+    (void)wifi_manager_scan_start();
     navigate_to(PAGE_NETWORK_SETUP);
 }
 
@@ -2149,7 +2141,7 @@ static void add_exclude_confirmation(const moonraker_exclude_object_t *object)
     lv_obj_set_style_text_font(description, &lv_font_montserrat_14, LV_PART_MAIN);
     lv_obj_set_style_text_color(description, ui_kit_tone_color(UI_TONE_MUTED), LV_PART_MAIN);
 
-    add_nav_hold_row("Exclude this object", "HOLD", UI_TONE_DANGER,
+    add_nav_hold_row("Exclude this object", NULL, UI_TONE_DANGER,
                      exclude_object_confirm_event, NULL);
 }
 
@@ -2958,7 +2950,6 @@ static void navigate_to(page_t page)
         exclude_objects_generation_seen = 0;
     }
     if (previous_page == PAGE_DIAGNOSTICS) diagnostics_label = NULL;
-    if (previous_page == PAGE_BATTERY) battery_debug_label = NULL;
     if (page != PAGE_MOVE) move_mode = MOVE_MODE_BROWSE;
     if (page != PAGE_TUNE) tune_mode = TUNE_MODE_BROWSE;
     current_page = page;
@@ -2987,8 +2978,7 @@ static void navigate_to(page_t page)
          * selected printer screen and must not overwrite the last card here. */
         fleet_printer_button = NULL;
         ui_kit_create_section(page_body, "PENDANT");
-        add_nav_row("Settings", "", UI_TONE_DEFAULT, true,
-                    navigation_event, (void *)PAGE_SETTINGS);
+        add_navigation_row("Settings", NULL, navigation_event, (void *)PAGE_SETTINGS);
         break;
     }
     case PAGE_STATUS:
@@ -3002,8 +2992,7 @@ static void navigate_to(page_t page)
         if (printer.job_state == PRINTER_JOB_PAUSED || printer.job_state == PRINTER_JOB_PRINTING) {
             add_print_actions(&printer);
         } else if (print_start_available(&printer)) {
-            add_nav_row("Start print", "", UI_TONE_SUCCESS, true,
-                        navigation_event, (void *)PAGE_START_PRINT);
+            add_navigation_row("Start print", NULL, navigation_event, (void *)PAGE_START_PRINT);
         }
         break;
     }
@@ -3020,9 +3009,9 @@ static void navigate_to(page_t page)
         const bool available = printer.connection == PRINTER_CONNECTION_ONLINE;
         char value[28];
         lv_label_set_text(page_title, "Tune");
-        lv_label_set_text(back_hint, "Hold = apply  |  Back = cancel");
+        lv_label_set_text(back_hint, "Back = cancel");
         ui_kit_create_section(page_body, "MOTION");
-        tune_offset_row = add_nav_row("Z Offset", "+0.00 mm", UI_TONE_ACCENT, available,
+        tune_offset_row = add_inline_control("Z Offset", "+0.00 mm", UI_TONE_ACCENT, available,
                                       tune_value_event, (void *)(uintptr_t)(TUNE_MODE_OFFSET << 8));
         char offset[28];
         const char offset_sign = tune_offset_centi_mm < 0 ? '-' : '+';
@@ -3033,19 +3022,19 @@ static void navigate_to(page_t page)
         ui_kit_set_row_text(tune_offset_row, "Z Offset", offset);
         if (tune_capabilities.speed_factor) {
             snprintf(value, sizeof(value), "%ld%%", (long)tune_speed_percent);
-            tune_speed_row = add_nav_row("Speed", value, UI_TONE_ACCENT, available,
+            tune_speed_row = add_inline_control("Speed", value, UI_TONE_ACCENT, available,
                                          tune_value_event, (void *)(uintptr_t)(TUNE_MODE_SPEED << 8));
         }
         if (tune_capabilities.flow_factor) {
             snprintf(value, sizeof(value), "%ld%%", (long)tune_flow_percent);
-            tune_flow_row = add_nav_row("Flow", value, UI_TONE_ACCENT, available,
+            tune_flow_row = add_inline_control("Flow", value, UI_TONE_ACCENT, available,
                                         tune_value_event, (void *)(uintptr_t)(TUNE_MODE_FLOW << 8));
         }
         if (tune_capabilities.fan_count > 0) ui_kit_create_section(page_body, "FANS");
         for (size_t i = 0; i < tune_capabilities.fan_count; ++i) {
             const printer_fan_capability_t *fan = &tune_capabilities.fans[i];
             snprintf(value, sizeof(value), "%u%%", fan->speed_percent);
-            tune_fan_rows[i] = add_nav_row(fan->label, value, UI_TONE_ACCENT,
+            tune_fan_rows[i] = add_inline_control(fan->label, value, UI_TONE_ACCENT,
                                            fan->available && fan->controllable,
                                            tune_value_event,
                                            (void *)(uintptr_t)((TUNE_MODE_FAN << 8) | i));
@@ -3056,14 +3045,14 @@ static void navigate_to(page_t page)
             snprintf(value, sizeof(value), "%d.%d / %d.%d C",
                      heater->current_deci_c / 10, abs(heater->current_deci_c % 10),
                      heater->target_deci_c / 10, abs(heater->target_deci_c % 10));
-            tune_heater_rows[i] = add_nav_row(heater->label, value, UI_TONE_ACCENT,
+            tune_heater_rows[i] = add_inline_control(heater->label, value, UI_TONE_ACCENT,
                                               heater->available && heater->controllable,
                                               tune_value_event,
                                               (void *)(uintptr_t)((TUNE_MODE_HEATER << 8) | i));
         }
         if (printer.job_state == PRINTER_JOB_PRINTING || printer.job_state == PRINTER_JOB_PAUSED) {
             ui_kit_create_section(page_body, "PRINT");
-            add_nav_row("Exclude objects", "OPEN", UI_TONE_WARNING, true, exclude_objects_event, NULL);
+            add_navigation_row("Exclude objects", NULL, exclude_objects_event, NULL);
         }
         break;
     }
@@ -3073,7 +3062,7 @@ static void navigate_to(page_t page)
         moonraker_get_exclude_objects(exclude_objects_snapshot);
         exclude_objects_generation_seen = exclude_objects_snapshot->generation;
         lv_label_set_text(page_title, "Exclude objects");
-        lv_label_set_text(back_hint, "Tap a part, then hold to exclude");
+        lv_label_set_text(back_hint, "Back: Tune");
         if (exclude_objects_snapshot->loading) {
             add_nav_row("Loading object markers...", NULL, UI_TONE_MUTED, false, NULL, NULL);
         } else if (!exclude_objects_snapshot->valid || exclude_objects_snapshot->count == 0) {
@@ -3102,13 +3091,13 @@ static void navigate_to(page_t page)
         printer_get_state(&printer);
         const bool available = move_commands_available();
         lv_label_set_text(page_title, "");
-        lv_label_set_text(back_hint, "Hold = move/apply  |  Back = Monitor");
-        add_nav_hold_row("E-STOP", "HOLD", UI_TONE_DANGER, emergency_stop_event, NULL);
+        lv_label_set_text(back_hint, "Back: Monitor");
+        add_nav_hold_row("E-STOP", NULL, UI_TONE_DANGER, emergency_stop_event, NULL);
         move_position_section = ui_kit_create_section(page_body, "POSITION (mm)");
         for (uint8_t axis = 0; axis < 3; ++axis) {
             char title[32];
             format_axis_title(title, sizeof(title), &printer, axis);
-            move_axis_rows[axis] = add_nav_row(title, " ", UI_TONE_ACCENT, available,
+            move_axis_rows[axis] = add_inline_control(title, " ", UI_TONE_ACCENT, available,
                                                 move_axis_event, (void *)(uintptr_t)axis);
             if (move_axis_rows[axis] != NULL) {
                 lv_obj_t *title_label = lv_obj_get_child(move_axis_rows[axis], 0);
@@ -3120,15 +3109,15 @@ static void navigate_to(page_t page)
         const int32_t selected_step = move_steps_centi_mm[move_step_index];
         snprintf(step, sizeof(step), "%ld.%02ld mm", (long)(selected_step / 100),
                  (long)(selected_step % 100));
-        move_step_row = add_nav_row("Step", step, UI_TONE_ACCENT, available, move_step_event, NULL);
-        move_park_row = add_nav_row("Park", "ALL", UI_TONE_WARNING, available, move_park_event, NULL);
+        move_step_row = add_inline_control("Step", step, UI_TONE_ACCENT, available, move_step_event, NULL);
+        move_park_row = add_inline_control("Park", "ALL", UI_TONE_WARNING, available, move_park_event, NULL);
         move_extrusion_section = ui_kit_create_section(page_body, "EXTRUSION");
-        move_extruder_feed_row = add_nav_row("Extruder feed", "", UI_TONE_ACCENT, available,
+        move_extruder_feed_row = add_inline_control("Extruder feed", "", UI_TONE_ACCENT, available,
                                              move_extruder_feed_event, NULL);
         char extruder_speed[24];
         snprintf(extruder_speed, sizeof(extruder_speed), "%ld mm/s",
                  (long)move_extruder_speed_mm_s);
-        move_extruder_speed_row = add_nav_row("Extruder speed", extruder_speed, UI_TONE_ACCENT,
+        move_extruder_speed_row = add_inline_control("Extruder speed", extruder_speed, UI_TONE_ACCENT,
                                               available, move_extruder_speed_event, NULL);
         add_nav_card("Macros", "User commands", ">", UI_TONE_DEFAULT,
                      navigation_event, (void *)PAGE_MACROS);
@@ -3147,7 +3136,7 @@ static void navigate_to(page_t page)
         }
         macros_generation_seen = macros_snapshot.generation;
         lv_label_set_text(page_title, "Macros");
-        lv_label_set_text(back_hint, "Hold a macro to run it  |  Back: Move");
+        lv_label_set_text(back_hint, "Back: Move");
         /* A refresh retains a valid snapshot, so only show a loader before
          * the first result.  Later responses rebuild this list in place. */
         if (macros_snapshot.loading && !macros_snapshot.valid) {
@@ -3158,7 +3147,11 @@ static void navigate_to(page_t page)
             size_t visible_count = 0;
             for (size_t i = 0; i < macros_snapshot.count; ++i) {
                 if (macros_snapshot.names[i][0] == '_') continue;
-                add_nav_wrapped_hold_card(macros_snapshot.names[i], UI_TONE_DEFAULT,
+                /* A macro is an executable control, even though its exact
+                 * effect is user-defined.  Accent distinguishes it from
+                 * passive white information without falsely marking it as a
+                 * warning or destructive action. */
+                add_nav_wrapped_hold_card(macros_snapshot.names[i], UI_TONE_ACCENT,
                                           macro_event, (void *)(uintptr_t)i);
                 ++visible_count;
             }
@@ -3247,7 +3240,7 @@ static void navigate_to(page_t page)
             printer_state_t printer;
             printer_get_state(&printer);
             if (print_start_available(&printer)) {
-                add_nav_hold_row("Repeat print", "HOLD", UI_TONE_SUCCESS,
+                add_nav_hold_row("Repeat print", NULL, UI_TONE_SUCCESS,
                                  start_selected_file_event, NULL);
             }
         }
@@ -3354,7 +3347,7 @@ static void navigate_to(page_t page)
         printer_state_t printer;
         printer_get_state(&printer);
         if (metadata.valid && print_start_available(&printer)) {
-            add_nav_hold_row("Start print", "HOLD", UI_TONE_SUCCESS, start_selected_file_event, NULL);
+            add_nav_hold_row("Start print", NULL, UI_TONE_SUCCESS, start_selected_file_event, NULL);
         } else if (!metadata.loading) {
             add_nav_row("Start print", "Printer not ready", UI_TONE_MUTED, false, NULL, NULL);
         }
@@ -3362,7 +3355,7 @@ static void navigate_to(page_t page)
     }
     case PAGE_SERVICE:
         lv_label_set_text(page_title, "Service");
-        lv_label_set_text(back_hint, "Hold a control to run it");
+        lv_label_set_text(back_hint, "Back: Monitor");
         add_nav_card("Console", "G-code responses and commands", ">", UI_TONE_DEFAULT,
                      navigation_event, (void *)PAGE_CONSOLE);
         add_nav_card("Info", "Disk space", ">", UI_TONE_DEFAULT,
@@ -3370,17 +3363,17 @@ static void navigate_to(page_t page)
         add_nav_card("Probe calibrate", "Calibrate probe Z offset", ">", UI_TONE_ACCENT,
                      navigation_event, (void *)PAGE_PROBE_CALIBRATE);
         ui_kit_create_section(page_body, "SYSTEM");
-        add_nav_hold_row("Firmware restart", "HOLD", UI_TONE_DANGER,
+        add_nav_hold_row("Firmware restart", NULL, UI_TONE_DANGER,
                          service_gcode_event, "FIRMWARE_RESTART");
-        add_nav_hold_row("Klipper restart", "HOLD", UI_TONE_DANGER,
+        add_nav_hold_row("Klipper restart", NULL, UI_TONE_DANGER,
                          service_gcode_event, "RESTART");
-        add_nav_hold_row("Moonraker restart", "HOLD", UI_TONE_DANGER,
+        add_nav_hold_row("Moonraker restart", NULL, UI_TONE_DANGER,
                          service_action_event, (void *)SERVICE_ACTION_MOONRAKER_RESTART);
-        add_nav_hold_row("Save config", "HOLD", UI_TONE_WARNING,
+        add_nav_hold_row("Save config", NULL, UI_TONE_SUCCESS,
                          service_gcode_event, "SAVE_CONFIG");
-        add_nav_hold_row("System restart", "HOLD", UI_TONE_DANGER,
+        add_nav_hold_row("System restart", NULL, UI_TONE_DANGER,
                          service_action_event, (void *)SERVICE_ACTION_SYSTEM_RESTART);
-        add_nav_hold_row("System shutdown", "HOLD", UI_TONE_DANGER,
+        add_nav_hold_row("System shutdown", NULL, UI_TONE_DANGER,
                          service_action_event, (void *)SERVICE_ACTION_SYSTEM_SHUTDOWN);
         break;
     case PAGE_PROBE_CALIBRATE:
@@ -3393,7 +3386,7 @@ static void navigate_to(page_t page)
         if (!manual_probe_snapshot.is_active) {
             ui_kit_create_section(page_body, "PROBE Z OFFSET");
             add_nav_row("Ready to calibrate", "", UI_TONE_DEFAULT, false, NULL, NULL);
-            add_nav_hold_row("Start", "HOLD", UI_TONE_SUCCESS,
+            add_nav_hold_row("Start", NULL, UI_TONE_SUCCESS,
                              probe_gcode_event, "PROBE_CALIBRATE");
             break;
         }
@@ -3418,15 +3411,15 @@ static void navigate_to(page_t page)
         add_nav_row("Up 0.1 mm", "+0.1", UI_TONE_ACCENT, true, probe_gcode_event, "TESTZ Z=0.1");
         add_nav_row("Up 1.0 mm", "+1.0", UI_TONE_ACCENT, true, probe_gcode_event, "TESTZ Z=1");
         ui_kit_create_section(page_body, "FINISH");
-        add_nav_hold_row("Accept", "HOLD", UI_TONE_SUCCESS, probe_gcode_event, "ACCEPT");
-        add_nav_hold_row("Abort", "HOLD", UI_TONE_DANGER, probe_gcode_event, "ABORT");
+        add_nav_hold_row("Accept", NULL, UI_TONE_SUCCESS, probe_gcode_event, "ACCEPT");
+        add_nav_hold_row("Abort", NULL, UI_TONE_DANGER, probe_gcode_event, "ABORT");
         break;
     }
     case PAGE_PROMPT:
         moonraker_get_prompt(&prompt_snapshot);
         prompt_generation_seen = prompt_snapshot.generation;
         lv_label_set_text(page_title, prompt_snapshot.title[0] ? prompt_snapshot.title : "Prompt");
-        lv_label_set_text(back_hint, "Hold an action to run it  |  Back: dismiss prompt");
+        lv_label_set_text(back_hint, "Back: dismiss prompt");
         if (prompt_snapshot.text[0])
             add_nav_wrapped_card(prompt_snapshot.text,
                                  prompt_snapshot.truncated ? "Message truncated" : "",
@@ -3436,7 +3429,7 @@ static void navigate_to(page_t page)
         for (size_t i = 0; i < prompt_snapshot.button_count; ++i) {
             moonraker_prompt_button_t *button = &prompt_snapshot.buttons[i];
             if (button->command[0] != '\0') {
-                add_nav_hold_row(button->label, button->footer ? "" : "HOLD",
+                add_nav_hold_row(button->label, NULL,
                                  prompt_style_tone(button->style), prompt_button_event, button);
             } else {
                 add_nav_row(button->label, button->footer ? "" : ">",
@@ -3522,10 +3515,10 @@ static void navigate_to(page_t page)
         lv_obj_t *new_label = lv_label_create(console_new_rows);
         lv_label_set_text(new_label, "↓ new output");
         lv_obj_center(new_label);
-        add_nav_row("Command", !console_command[0] ? "EDIT" :
-                    (strchr(console_command, '\n') != NULL ? "Multi-line script" : console_command), UI_TONE_DEFAULT,
-                    true, console_command_event, NULL);
-        add_nav_hold_row("Send", "HOLD", UI_TONE_WARNING, console_send_event, NULL);
+        add_inline_control("Command", !console_command[0] ? "Edit" :
+                           (strchr(console_command, '\n') != NULL ? "Multi-line script" : console_command),
+                           UI_TONE_ACCENT, true, console_command_event, NULL);
+        add_nav_hold_row("Send", NULL, UI_TONE_SUCCESS, console_send_event, NULL);
         refresh_console_output();
         break;
     }
@@ -3566,13 +3559,13 @@ static void navigate_to(page_t page)
         size_t printer_count = 0;
         settings_get_printers(printer_list_snapshot, SETTINGS_MAX_PRINTERS, &printer_count);
         ui_kit_create_section(page_body, "CONNECTIVITY");
-        add_nav_row("Network", wifi_manager_state_name(wifi.state),
-                    wifi.state == WIFI_MANAGER_CONNECTED ? UI_TONE_SUCCESS : UI_TONE_WARNING,
-                    true, navigation_event, (void *)PAGE_NETWORK_SETUP);
+        add_nav_card("Network", wifi_manager_state_name(wifi.state), NULL,
+                     wifi.state == WIFI_MANAGER_CONNECTED ? UI_TONE_SUCCESS : UI_TONE_WARNING,
+                     navigation_event, (void *)PAGE_NETWORK_SETUP);
         char printer_summary[24];
         snprintf(printer_summary, sizeof(printer_summary), "%u configured", (unsigned)printer_count);
-        add_nav_row("Printers", printer_summary, UI_TONE_DEFAULT, true,
-                    navigation_event, (void *)PAGE_PRINTER_LIST);
+        add_nav_card("Printers", printer_summary, NULL, UI_TONE_DEFAULT,
+                     navigation_event, (void *)PAGE_PRINTER_LIST);
         ui_kit_create_section(page_body, "DEVICE");
         char brightness[16];
         snprintf(brightness, sizeof(brightness), "%u%%", board_get_backlight());
@@ -3581,15 +3574,10 @@ static void navigate_to(page_t page)
         settings_get_theme(&theme);
         add_nav_row("Theme", theme == SETTINGS_THEME_DARK ? "Dark" : "Light",
                     UI_TONE_ACCENT, true, theme_event, NULL);
-        add_nav_row("Button mapping", NULL, UI_TONE_DEFAULT, true,
-                    navigation_event, (void *)PAGE_BUTTON_MAPPING);
-        add_nav_row("Battery", "Live debug", UI_TONE_DEFAULT, true,
-                    navigation_event, (void *)PAGE_BATTERY);
-        add_nav_row("Firmware", NULL, UI_TONE_DEFAULT, true,
-                    navigation_event, (void *)PAGE_FIRMWARE);
+        add_navigation_row("Button mapping", NULL, navigation_event, (void *)PAGE_BUTTON_MAPPING);
+        add_navigation_row("Firmware", NULL, navigation_event, (void *)PAGE_FIRMWARE);
         ui_kit_create_section(page_body, "SYSTEM");
-        add_nav_row("Diagnostics", NULL, UI_TONE_DEFAULT, true,
-                    navigation_event, (void *)PAGE_DIAGNOSTICS);
+        add_navigation_row("Diagnostics", NULL, navigation_event, (void *)PAGE_DIAGNOSTICS);
         break;
     }
     case PAGE_BUTTON_MAPPING:
@@ -3610,15 +3598,10 @@ static void navigate_to(page_t page)
         }
         if (editable_button_mapping.left == SETTINGS_BUTTON_ACTION_GCODE)
             add_nav_row("Set G-code", editable_button_mapping.left_gcode[0] ? "EDIT" : "SET",
-                        UI_TONE_WARNING, true, edit_field_event, (void *)EDIT_LEFT_BUTTON_GCODE);
+                        UI_TONE_ACCENT, true, edit_field_event, (void *)EDIT_LEFT_BUTTON_GCODE);
         if (editable_button_mapping.right == SETTINGS_BUTTON_ACTION_GCODE)
             add_nav_row("Set G-code", editable_button_mapping.right_gcode[0] ? "EDIT" : "SET",
-                        UI_TONE_WARNING, true, edit_field_event, (void *)EDIT_RIGHT_BUTTON_GCODE);
-        ui_kit_create_section(page_body, "ACTIONS");
-        add_nav_row("None", "Disabled", UI_TONE_MUTED, false, NULL, NULL);
-        add_nav_row("Back", "Go back", UI_TONE_DEFAULT, false, NULL, NULL);
-        add_nav_row("E-stop", "Hold to send", UI_TONE_DANGER, false, NULL, NULL);
-        add_nav_row("G-code", "Hold to run", UI_TONE_WARNING, false, NULL, NULL);
+                        UI_TONE_ACCENT, true, edit_field_event, (void *)EDIT_RIGHT_BUTTON_GCODE);
         break;
     }
     case PAGE_PRINTER_LIST:
@@ -3652,19 +3635,24 @@ static void navigate_to(page_t page)
         lv_label_set_text(page_title, "Wi-Fi setup");
         lv_label_set_text(back_hint, "Save connects  |  Back: Settings");
         char item[80];
-        snprintf(item, sizeof(item), "Network: %s", editable_wifi.ssid[0] ? editable_wifi.ssid : "not set");
-        add_nav_button(item, edit_field_event, (void *)EDIT_WIFI_SSID);
+        add_inline_control("Network", editable_wifi.ssid[0] ? editable_wifi.ssid : "not set",
+                           UI_TONE_ACCENT, true, edit_field_event, (void *)EDIT_WIFI_SSID);
         add_nav_button("Scan Wi-Fi networks", scan_networks_event, NULL);
-        add_nav_button("Password: change", edit_field_event, (void *)EDIT_WIFI_PASSWORD);
-        add_nav_button("Save and connect", save_network_event, NULL);
+        add_inline_control("Password", "Change", UI_TONE_ACCENT, true,
+                           edit_field_event, (void *)EDIT_WIFI_PASSWORD);
+        add_commit_action("Save and connect", save_network_event, NULL);
         wifi_manager_status_t wifi;
         wifi_manager_get_status(&wifi);
-        char status[64];
-        snprintf(status, sizeof(status), "Status: %s%s%s", wifi_manager_state_name(wifi.state),
-                 wifi.ip[0] ? " / " : "", wifi.ip);
-        add_nav_button(status, navigation_event, (void *)PAGE_NETWORK_SETUP);
+        wifi_generation_seen = wifi.generation;
+        char connection[24];
+        strlcpy(connection, wifi_manager_state_name(wifi.state), sizeof(connection));
+        if (connection[0] >= 'a' && connection[0] <= 'z') connection[0] -= 'a' - 'A';
+        char ip[24];
+        snprintf(ip, sizeof(ip), "IP: %s", wifi.ip[0] ? wifi.ip : "unavailable");
+        add_nav_info_row("Status", connection, ip,
+                         wifi.state == WIFI_MANAGER_CONNECTED ? UI_TONE_SUCCESS : UI_TONE_WARNING);
         if (wifi.scanning) {
-            add_nav_button("Scanning nearby networks...", navigation_event, (void *)PAGE_NETWORK_SETUP);
+            add_nav_row("Scanning nearby networks...", NULL, UI_TONE_MUTED, false, NULL, NULL);
         } else {
             wifi_manager_network_t networks[8];
             size_t count = wifi_manager_get_networks(networks, 8);
@@ -3679,13 +3667,14 @@ static void navigate_to(page_t page)
     {
         lv_label_set_text(page_title, editing_printer_index == SIZE_MAX ? "Add printer" : "Edit printer");
         char item[96];
-        snprintf(item, sizeof(item), "Name: %s", editable_printer.name[0] ? editable_printer.name : "not set");
-        add_nav_button(item, edit_field_event, (void *)EDIT_PRINTER_NAME);
-        snprintf(item, sizeof(item), "Host: %s", editable_printer.host[0] ? editable_printer.host : "not set");
-        add_nav_button(item, edit_field_event, (void *)EDIT_PRINTER_HOST);
-        snprintf(item, sizeof(item), "Port: %u", editable_printer.port);
-        add_nav_button(item, edit_field_event, (void *)EDIT_PRINTER_PORT);
-        add_nav_button("Save printer", save_printer_event, NULL);
+        add_inline_control("Name", editable_printer.name[0] ? editable_printer.name : "not set",
+                           UI_TONE_ACCENT, true, edit_field_event, (void *)EDIT_PRINTER_NAME);
+        add_inline_control("Host", editable_printer.host[0] ? editable_printer.host : "not set",
+                           UI_TONE_ACCENT, true, edit_field_event, (void *)EDIT_PRINTER_HOST);
+        snprintf(item, sizeof(item), "%u", editable_printer.port);
+        add_inline_control("Port", item, UI_TONE_ACCENT, true,
+                           edit_field_event, (void *)EDIT_PRINTER_PORT);
+        add_commit_action("Save printer", save_printer_event, NULL);
         break;
     }
     case PAGE_DIAGNOSTICS:
@@ -3693,16 +3682,10 @@ static void navigate_to(page_t page)
         lv_label_set_text(back_hint, "Live status  |  Back: Settings");
         diagnostics_label = lv_label_create(page_body);
         lv_obj_set_width(diagnostics_label, LV_PCT(100));
+        lv_label_set_long_mode(diagnostics_label, LV_LABEL_LONG_WRAP);
+        lv_obj_set_height(diagnostics_label, LV_SIZE_CONTENT);
         lv_obj_set_style_text_color(diagnostics_label, ui_kit_tone_color(UI_TONE_DEFAULT), LV_PART_MAIN);
         refresh_diagnostics();
-        break;
-    case PAGE_BATTERY:
-        lv_label_set_text(page_title, "Battery");
-        lv_label_set_text(back_hint, "Live status  |  Back: Settings");
-        battery_debug_label = lv_label_create(page_body);
-        lv_obj_set_width(battery_debug_label, LV_PCT(100));
-        lv_obj_set_style_text_color(battery_debug_label, ui_kit_tone_color(UI_TONE_DEFAULT), LV_PART_MAIN);
-        refresh_battery_debug();
         break;
     case PAGE_FIRMWARE:
     {
@@ -3731,7 +3714,7 @@ static void navigate_to(page_t page)
                     add_nav_row(update.releases[i].version, "Installed", UI_TONE_MUTED, false, NULL, NULL);
                 } else {
                     snprintf(label, sizeof(label), "Install %s", update.releases[i].version);
-                    add_nav_hold_row(label, "HOLD", UI_TONE_WARNING, firmware_install_release_event,
+                    add_nav_hold_row(label, NULL, UI_TONE_WARNING, firmware_install_release_event,
                                      (void *)(uintptr_t)i);
                 }
             }
@@ -3799,7 +3782,7 @@ esp_err_t pendant_ui_init(void)
     lv_obj_set_style_border_width(header_connection_dot, 0, LV_PART_MAIN);
     lv_obj_clear_flag(header_connection_dot, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
     header_printer_label = lv_label_create(header_printer_button);
-    lv_label_set_long_mode(header_printer_label, LV_LABEL_LONG_DOT);
+    lv_label_set_long_mode(header_printer_label, LV_LABEL_LONG_SCROLL_CIRCULAR);
     lv_obj_set_width(header_printer_label, 120);
     lv_obj_align(header_printer_label, LV_ALIGN_LEFT_MID, 16, 0);
     lv_obj_set_style_text_font(header_printer_label, &lv_font_montserrat_18, LV_PART_MAIN);
@@ -3809,7 +3792,7 @@ esp_err_t pendant_ui_init(void)
     command_feedback_label = lv_label_create(screen);
     lv_obj_set_width(command_feedback_label, 205);
     lv_obj_align(command_feedback_label, LV_ALIGN_TOP_LEFT, 10, 34);
-    lv_label_set_long_mode(command_feedback_label, LV_LABEL_LONG_DOT);
+    lv_label_set_long_mode(command_feedback_label, LV_LABEL_LONG_SCROLL_CIRCULAR);
     lv_obj_set_style_text_font(command_feedback_label, &lv_font_montserrat_14, LV_PART_MAIN);
     lv_obj_add_flag(command_feedback_label, LV_OBJ_FLAG_HIDDEN);
     command_feedback_timer = lv_timer_create(command_feedback_timer_cb, 3500, NULL);
@@ -3828,7 +3811,7 @@ esp_err_t pendant_ui_init(void)
     lv_obj_align(page_title, LV_ALIGN_TOP_LEFT, 12, 57);
     lv_obj_set_width(page_title, 296);
     lv_obj_set_height(page_title, 24);
-    lv_label_set_long_mode(page_title, LV_LABEL_LONG_DOT);
+    lv_label_set_long_mode(page_title, LV_LABEL_LONG_SCROLL_CIRCULAR);
 
     battery_label = lv_label_create(screen);
     /* 100% plus both Font Awesome glyphs needs more than 64 px at 14 pt. */
@@ -3922,7 +3905,7 @@ esp_err_t pendant_ui_init(void)
     lv_obj_set_style_text_color(back_hint, ui_kit_tone_color(UI_TONE_MUTED), LV_PART_MAIN);
     lv_obj_align(back_hint, LV_ALIGN_BOTTOM_LEFT, 12, -68);
     lv_obj_set_width(back_hint, 296);
-    lv_label_set_long_mode(back_hint, LV_LABEL_LONG_DOT);
+    lv_label_set_long_mode(back_hint, LV_LABEL_LONG_SCROLL_CIRCULAR);
 
     static const char *nav_labels[] = {
         LV_SYMBOL_HOME "\nMonitor", LV_SYMBOL_SETTINGS "\nTune", LV_SYMBOL_RIGHT "\nMove",

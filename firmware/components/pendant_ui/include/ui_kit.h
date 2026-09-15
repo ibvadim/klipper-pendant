@@ -36,13 +36,23 @@ typedef enum {
     UI_COLOR_STATUS_DANGER,
 } ui_color_token_t;
 
+typedef enum {
+    UI_ITEM_NAVIGATION,
+    UI_ITEM_ACTION,
+    UI_ITEM_HOLD_ACTION,
+    UI_ITEM_INLINE,
+    UI_ITEM_INFO,
+    UI_ITEM_NOTICE,
+    UI_ITEM_UNAVAILABLE,
+} ui_item_kind_t;
+
 typedef struct {
     const char *title;
     const char *subtitle;
     const char *value;
     ui_tone_t tone;
-    bool enabled;
-} ui_row_spec_t;
+    ui_item_kind_t kind;
+} ui_item_spec_t;
 
 /** Initializes the shared LVGL styles. Safe to call more than once. */
 void ui_kit_init(void);
@@ -55,18 +65,25 @@ void ui_kit_apply_screen(lv_obj_t *screen);
 /** Creates a non-focusable section heading inside a scrolling content area. */
 lv_obj_t *ui_kit_create_section(lv_obj_t *parent, const char *title);
 
-/** Creates a row and, when enabled, adds it to the shared navigation group. */
-lv_obj_t *ui_kit_create_row(lv_obj_t *parent, lv_group_t *group,
-                            const ui_row_spec_t *spec,
-                            lv_event_cb_t callback, void *user_data);
+/** Creates a semantic item.  INFO, NOTICE and UNAVAILABLE are never buttons
+ * and are never added to the navigation group. */
+lv_obj_t *ui_kit_create_item(lv_obj_t *parent, lv_group_t *group,
+                             const ui_item_spec_t *spec,
+                             lv_event_cb_t callback, void *user_data);
 
 /** Creates a card with a wrapped, full-width title and content-based height.
  * Unlike a regular row, focusing it never starts a marquee. */
-lv_obj_t *ui_kit_create_wrapped_row(lv_obj_t *parent, lv_group_t *group,
-                                    const ui_row_spec_t *spec,
-                                    lv_event_cb_t callback, void *user_data);
+lv_obj_t *ui_kit_create_wrapped_item(lv_obj_t *parent, lv_group_t *group,
+                                     const ui_item_spec_t *spec,
+                                     lv_event_cb_t callback, void *user_data);
 
-/** Updates the two textual fields of a row created by ui_kit_create_row. */
+/** Compact hold action for fixed monitor toolbars. */
+lv_obj_t *ui_kit_create_compact_hold_action(lv_obj_t *parent, lv_group_t *group,
+                                            lv_coord_t width, lv_coord_t height,
+                                            const char *label, ui_tone_t tone,
+                                            lv_event_cb_t callback);
+
+/** Updates the two textual fields of a semantic interactive item. */
 void ui_kit_set_row_text(lv_obj_t *row, const char *title, const char *value);
 
 /** Updates the optional secondary line and expands the row when needed. */

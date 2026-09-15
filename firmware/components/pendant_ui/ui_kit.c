@@ -19,7 +19,8 @@ static bool initialized;
 static ui_theme_t active_theme = UI_THEME_LIGHT;
 static lv_style_t row_style;
 static lv_style_t row_focused_style;
-static lv_style_t row_disabled_style;
+static lv_style_t info_style;
+static lv_style_t notice_style;
 
 lv_color_t ui_kit_color(ui_color_token_t token)
 {
@@ -75,11 +76,19 @@ void ui_kit_init(void)
     lv_style_set_outline_width(&row_focused_style, 2);
     lv_style_set_outline_pad(&row_focused_style, 0);
 
-    lv_style_init(&row_disabled_style);
-    lv_style_set_bg_color(&row_disabled_style, ui_kit_color(UI_COLOR_SURFACE_2));
-    lv_style_set_border_color(&row_disabled_style, ui_kit_color(UI_COLOR_BORDER));
-    /* Disabled state uses solid SURFACE_2 and TEXT_DISABLED, never opacity. */
-    lv_style_set_text_color(&row_disabled_style, ui_kit_color(UI_COLOR_TEXT_DISABLED));
+    lv_style_init(&info_style);
+    lv_style_set_bg_opa(&info_style, LV_OPA_TRANSP);
+    lv_style_set_border_width(&info_style, 0);
+    lv_style_set_pad_left(&info_style, 12);
+    lv_style_set_pad_right(&info_style, 12);
+
+    lv_style_init(&notice_style);
+    lv_style_set_bg_color(&notice_style, ui_kit_color(UI_COLOR_SURFACE_2));
+    lv_style_set_border_color(&notice_style, ui_kit_color(UI_COLOR_BORDER));
+    lv_style_set_border_width(&notice_style, 1);
+    lv_style_set_radius(&notice_style, 6);
+    lv_style_set_pad_left(&notice_style, 12);
+    lv_style_set_pad_right(&notice_style, 12);
 
     initialized = true;
 }
@@ -92,9 +101,8 @@ void ui_kit_set_theme(ui_theme_t theme)
     lv_style_set_bg_color(&row_focused_style, ui_kit_color(UI_COLOR_SURFACE_FOCUSED));
     lv_style_set_border_color(&row_focused_style, ui_kit_color(UI_COLOR_BORDER_FOCUSED));
     lv_style_set_outline_color(&row_focused_style, ui_kit_color(UI_COLOR_BORDER_FOCUSED));
-    lv_style_set_bg_color(&row_disabled_style, ui_kit_color(UI_COLOR_SURFACE_2));
-    lv_style_set_border_color(&row_disabled_style, ui_kit_color(UI_COLOR_BORDER));
-    lv_style_set_text_color(&row_disabled_style, ui_kit_color(UI_COLOR_TEXT_DISABLED));
+    lv_style_set_bg_color(&notice_style, ui_kit_color(UI_COLOR_SURFACE_2));
+    lv_style_set_border_color(&notice_style, ui_kit_color(UI_COLOR_BORDER));
 }
 
 ui_theme_t ui_kit_get_theme(void)
@@ -141,7 +149,8 @@ static void stop_row_marquee_event(lv_event_t *event)
 {
     lv_obj_t *title = lv_obj_get_child(lv_event_get_target(event), 0);
     if (title != NULL) {
-        lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
+        /* Live values must remain readable; scroll only when they overflow. */
+        lv_label_set_long_mode(title, LV_LABEL_LONG_SCROLL_CIRCULAR);
         lv_obj_invalidate(title);
     }
 }
@@ -161,24 +170,77 @@ static void touch_focus_row_event(lv_event_t *event)
     if (group != NULL) lv_group_focus_obj(lv_event_get_target(event));
 }
 
-lv_obj_t *ui_kit_create_row(lv_obj_t *parent, lv_group_t *group,
-                            const ui_row_spec_t *spec,
-                            lv_event_cb_t callback, void *user_data)
+static bool item_is_interactive(ui_item_kind_t kind)
+{
+    return kind == UI_ITEM_NAVIGATION || kind == UI_ITEM_ACTION ||
+           kind == UI_ITEM_HOLD_ACTION || kind == UI_ITEM_INLINE;
+}
+
+static const char *item_value(const ui_item_spec_t *spec)
+{
+    if (spec->kind == UI_ITEM_HOLD_ACTION && (spec->value == NULL || spec->value[0] == '\0')) return LV_SYMBOL_PLAY;
+    return spec->value == NULL ? "" : spec->value;
+}
+
+/* Keep both texts fully visible whenever their rendered glyph widths fit in
+ * one row.  Falling back to equal columns makes the overflow rule predictable:
+ * a label scrolls only after it grows beyond half the available row width. */
+static void layout_item_text(lv_obj_t *row, lv_obj_t *title, lv_obj_t *value)
+{
+    if (row == NULL || title == NULL || value == NULL) return;
+
+    const char *title_text = lv_label_get_text(title);
+    const char *value_text = lv_label_get_text(value);
+    const lv_coord_t available = lv_obj_get_content_width(row);
+    if (value_text[0] == '\0') {
+        lv_obj_set_width(title, available);
+        return;
+    }
+
+    const lv_font_t *title_font = lv_obj_get_style_text_font(title, LV_PART_MAIN);
+    const lv_font_t *value_font = lv_obj_get_style_text_font(value, LV_PART_MAIN);
+    const lv_coord_t title_width = lv_txt_get_width(title_text, strlen(title_text), title_font,
+        lv_obj_get_style_text_letter_space(title, LV_PART_MAIN), LV_TEXT_FLAG_NONE);
+    const lv_coord_t value_width = lv_txt_get_width(value_text, strlen(value_text), value_font,
+        lv_obj_get_style_text_letter_space(value, LV_PART_MAIN), LV_TEXT_FLAG_NONE);
+    const lv_coord_t gap = 8;
+
+    if (title_width + value_width + gap <= available) {
+        lv_obj_set_width(title, title_width);
+        lv_obj_set_width(value, value_width);
+    } else {
+        lv_obj_set_width(title, (available - gap) / 2);
+        lv_obj_set_width(value, (available - gap) / 2);
+    }
+}
+
+lv_obj_t *ui_kit_create_item(lv_obj_t *parent, lv_group_t *group,
+                             const ui_item_spec_t *spec,
+                             lv_event_cb_t callback, void *user_data)
 {
     if (parent == NULL || spec == NULL) return NULL;
 
-    lv_obj_t *row = lv_btn_create(parent);
+    const bool interactive = item_is_interactive(spec->kind);
+    lv_obj_t *row = interactive ? lv_btn_create(parent) : lv_obj_create(parent);
     /* Do not create orphaned labels on the active screen when LVGL cannot
      * allocate a row.  Apart from looking corrupted, those labels would
      * remain after the next page refresh. */
     if (row == NULL) return NULL;
     const bool has_subtitle = spec->subtitle != NULL && spec->subtitle[0] != '\0';
     lv_obj_set_size(row, LV_PCT(100), has_subtitle ? 66 : 48);
-    lv_obj_add_style(row, &row_style, LV_PART_MAIN);
-    lv_obj_add_style(row, &row_focused_style, LV_PART_MAIN | LV_STATE_FOCUSED);
-    lv_obj_add_event_cb(row, scroll_focused_row_event, LV_EVENT_FOCUSED, NULL);
-    lv_obj_add_event_cb(row, stop_row_marquee_event, LV_EVENT_DEFOCUSED, NULL);
-    if (group != NULL) lv_obj_add_event_cb(row, touch_focus_row_event, LV_EVENT_PRESSED, group);
+    lv_obj_add_style(row, interactive ? &row_style :
+                     (spec->kind == UI_ITEM_INFO ? &info_style : &notice_style), LV_PART_MAIN);
+    if (spec->kind == UI_ITEM_NOTICE || spec->kind == UI_ITEM_UNAVAILABLE) {
+        lv_obj_set_style_border_color(row, ui_kit_tone_color(spec->tone), LV_PART_MAIN);
+    }
+    if (interactive) {
+        lv_obj_add_style(row, &row_focused_style, LV_PART_MAIN | LV_STATE_FOCUSED);
+        lv_obj_add_event_cb(row, scroll_focused_row_event, LV_EVENT_FOCUSED, NULL);
+        lv_obj_add_event_cb(row, stop_row_marquee_event, LV_EVENT_DEFOCUSED, NULL);
+        if (group != NULL) lv_obj_add_event_cb(row, touch_focus_row_event, LV_EVENT_PRESSED, group);
+    } else {
+        lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+    }
 
     lv_obj_t *title = lv_label_create(row);
     if (title == NULL) {
@@ -186,26 +248,30 @@ lv_obj_t *ui_kit_create_row(lv_obj_t *parent, lv_group_t *group,
         return NULL;
     }
     lv_label_set_text(title, spec->title == NULL ? "" : spec->title);
-    lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
-    /* Coordinates and temperatures need more room than the original 30% value
-     * column provided on the 320 px display. */
-    lv_obj_set_width(title, spec->value == NULL || spec->value[0] == '\0' ? LV_PCT(100) : LV_PCT(52));
+    lv_label_set_long_mode(title, LV_LABEL_LONG_SCROLL_CIRCULAR);
+    const char *value_text = item_value(spec);
     lv_obj_set_height(title, 22);
     lv_obj_align(title, LV_ALIGN_LEFT_MID, 0, has_subtitle ? -10 : 0);
-    lv_obj_set_style_text_color(title, ui_kit_color(UI_COLOR_TEXT_PRIMARY), LV_PART_MAIN);
+    lv_obj_set_style_text_color(title, spec->kind == UI_ITEM_INFO ? ui_kit_color(UI_COLOR_TEXT_MUTED) :
+                                (spec->kind == UI_ITEM_NOTICE ||
+                                 ((spec->kind == UI_ITEM_ACTION || spec->kind == UI_ITEM_HOLD_ACTION) &&
+                                  spec->tone != UI_TONE_DEFAULT) ? ui_kit_tone_color(spec->tone) :
+                                 ui_kit_color(UI_COLOR_TEXT_PRIMARY)), LV_PART_MAIN);
 
     lv_obj_t *value = lv_label_create(row);
     if (value == NULL) {
         lv_obj_del(row);
         return NULL;
     }
-    lv_label_set_text(value, spec->value == NULL ? "" : spec->value);
-    lv_label_set_long_mode(value, LV_LABEL_LONG_DOT);
-    lv_obj_set_width(value, LV_PCT(45));
+    lv_label_set_text(value, value_text);
+    lv_label_set_long_mode(value, LV_LABEL_LONG_SCROLL_CIRCULAR);
     lv_obj_set_height(value, 22);
     lv_obj_set_style_text_align(value, LV_TEXT_ALIGN_RIGHT, LV_PART_MAIN);
     lv_obj_align(value, LV_ALIGN_RIGHT_MID, 0, has_subtitle ? -10 : 0);
-    lv_obj_set_style_text_color(value, ui_kit_tone_color(spec->tone), LV_PART_MAIN);
+    lv_obj_set_style_text_color(value, spec->kind == UI_ITEM_INFO && spec->tone == UI_TONE_DEFAULT ?
+                                ui_kit_color(UI_COLOR_TEXT_PRIMARY) :
+                                (spec->kind == UI_ITEM_INLINE ? ui_kit_color(UI_COLOR_ACCENT) :
+                                 ui_kit_tone_color(spec->tone)), LV_PART_MAIN);
 
     lv_obj_t *subtitle = lv_label_create(row);
     if (subtitle == NULL) {
@@ -213,36 +279,45 @@ lv_obj_t *ui_kit_create_row(lv_obj_t *parent, lv_group_t *group,
         return NULL;
     }
     lv_label_set_text(subtitle, has_subtitle ? spec->subtitle : "");
-    lv_label_set_long_mode(subtitle, LV_LABEL_LONG_DOT);
+    lv_label_set_long_mode(subtitle, LV_LABEL_LONG_SCROLL_CIRCULAR);
     lv_obj_set_width(subtitle, LV_PCT(100));
     lv_obj_set_height(subtitle, 18);
     lv_obj_align(subtitle, LV_ALIGN_BOTTOM_LEFT, 0, -7);
     lv_obj_set_style_text_color(subtitle, ui_kit_color(UI_COLOR_TEXT_MUTED), LV_PART_MAIN);
     lv_obj_set_style_text_font(subtitle, &lv_font_montserrat_14, LV_PART_MAIN);
 
-    if (spec->enabled) {
+    lv_obj_update_layout(row);
+    layout_item_text(row, title, value);
+
+    if (interactive) {
         if (callback != NULL) lv_obj_add_event_cb(row, callback, LV_EVENT_CLICKED, user_data);
         if (group != NULL) lv_group_add_obj(group, row);
-    } else {
-        lv_obj_add_state(row, LV_STATE_DISABLED);
-        lv_obj_add_style(row, &row_disabled_style, LV_PART_MAIN | LV_STATE_DISABLED);
     }
     return row;
 }
 
-lv_obj_t *ui_kit_create_wrapped_row(lv_obj_t *parent, lv_group_t *group,
-                                    const ui_row_spec_t *spec,
-                                    lv_event_cb_t callback, void *user_data)
+lv_obj_t *ui_kit_create_wrapped_item(lv_obj_t *parent, lv_group_t *group,
+                                     const ui_item_spec_t *spec,
+                                     lv_event_cb_t callback, void *user_data)
 {
     if (parent == NULL || spec == NULL) return NULL;
 
-    lv_obj_t *row = lv_btn_create(parent);
+    const bool interactive = item_is_interactive(spec->kind);
+    lv_obj_t *row = interactive ? lv_btn_create(parent) : lv_obj_create(parent);
     if (row == NULL) return NULL;
     lv_obj_set_width(row, LV_PCT(100));
-    lv_obj_add_style(row, &row_style, LV_PART_MAIN);
-    lv_obj_add_style(row, &row_focused_style, LV_PART_MAIN | LV_STATE_FOCUSED);
-    lv_obj_add_event_cb(row, scroll_focused_wrapped_row_event, LV_EVENT_FOCUSED, NULL);
-    if (group != NULL) lv_obj_add_event_cb(row, touch_focus_row_event, LV_EVENT_PRESSED, group);
+    lv_obj_add_style(row, interactive ? &row_style :
+                     (spec->kind == UI_ITEM_INFO ? &info_style : &notice_style), LV_PART_MAIN);
+    if (spec->kind == UI_ITEM_NOTICE || spec->kind == UI_ITEM_UNAVAILABLE) {
+        lv_obj_set_style_border_color(row, ui_kit_tone_color(spec->tone), LV_PART_MAIN);
+    }
+    if (interactive) {
+        lv_obj_add_style(row, &row_focused_style, LV_PART_MAIN | LV_STATE_FOCUSED);
+        lv_obj_add_event_cb(row, scroll_focused_wrapped_row_event, LV_EVENT_FOCUSED, NULL);
+        if (group != NULL) lv_obj_add_event_cb(row, touch_focus_row_event, LV_EVENT_PRESSED, group);
+    } else {
+        lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+    }
 
     lv_obj_t *title = lv_label_create(row);
     lv_obj_t *value = lv_label_create(row);
@@ -260,7 +335,7 @@ lv_obj_t *ui_kit_create_wrapped_row(lv_obj_t *parent, lv_group_t *group,
     lv_obj_align(title, LV_ALIGN_TOP_LEFT, 0, 8);
     lv_obj_set_style_text_color(title, ui_kit_color(UI_COLOR_TEXT_PRIMARY), LV_PART_MAIN);
 
-    lv_label_set_text(value, spec->value == NULL ? "" : spec->value);
+    lv_label_set_text(value, item_value(spec));
     lv_obj_set_width(value, LV_PCT(10));
     lv_obj_set_height(value, 22);
     lv_obj_align(value, LV_ALIGN_TOP_RIGHT, 0, 8);
@@ -285,14 +360,40 @@ lv_obj_t *ui_kit_create_wrapped_row(lv_obj_t *parent, lv_group_t *group,
     const lv_coord_t content_height = title_height + subtitle_height + (has_subtitle ? 20 : 16);
     lv_obj_set_height(row, content_height < 48 ? 48 : content_height);
 
-    if (spec->enabled) {
+    if (interactive) {
         if (callback != NULL) lv_obj_add_event_cb(row, callback, LV_EVENT_CLICKED, user_data);
         if (group != NULL) lv_group_add_obj(group, row);
-    } else {
-        lv_obj_add_state(row, LV_STATE_DISABLED);
-        lv_obj_add_style(row, &row_disabled_style, LV_PART_MAIN | LV_STATE_DISABLED);
     }
     return row;
+}
+
+lv_obj_t *ui_kit_create_compact_hold_action(lv_obj_t *parent, lv_group_t *group,
+                                            lv_coord_t width, lv_coord_t height,
+                                            const char *label_text, ui_tone_t tone,
+                                            lv_event_cb_t callback)
+{
+    if (parent == NULL) return NULL;
+    lv_obj_t *action = lv_btn_create(parent);
+    if (action == NULL) return NULL;
+    lv_obj_set_size(action, width, height);
+    lv_obj_add_style(action, &row_style, LV_PART_MAIN);
+    lv_obj_add_style(action, &row_focused_style, LV_PART_MAIN | LV_STATE_FOCUSED);
+    if (group != NULL) {
+        lv_obj_add_event_cb(action, touch_focus_row_event, LV_EVENT_PRESSED, group);
+        lv_group_add_obj(group, action);
+    }
+    if (callback != NULL) lv_obj_add_event_cb(action, callback, LV_EVENT_LONG_PRESSED, NULL);
+
+    lv_obj_t *label = lv_label_create(action);
+    if (label == NULL) {
+        lv_obj_del(action);
+        return NULL;
+    }
+    lv_label_set_text_fmt(label, "%s " LV_SYMBOL_PLAY, label_text == NULL ? "" : label_text);
+    lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+    lv_obj_set_style_text_color(label, ui_kit_tone_color(tone), LV_PART_MAIN);
+    lv_obj_center(label);
+    return action;
 }
 
 void ui_kit_set_row_text(lv_obj_t *row, const char *title, const char *value)
@@ -302,6 +403,7 @@ void ui_kit_set_row_text(lv_obj_t *row, const char *title, const char *value)
     lv_obj_t *value_label = lv_obj_get_child(row, 1);
     if (title_label != NULL) lv_label_set_text(title_label, title == NULL ? "" : title);
     if (value_label != NULL) lv_label_set_text(value_label, value == NULL ? "" : value);
+    layout_item_text(row, title_label, value_label);
 }
 
 void ui_kit_set_row_subtitle(lv_obj_t *row, const char *subtitle)

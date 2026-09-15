@@ -17,6 +17,11 @@ static bool configured;
 static wifi_manager_network_t networks[WIFI_MANAGER_MAX_NETWORKS];
 static size_t network_count;
 
+static void bump_generation(void)
+{
+    ++status.generation;
+}
+
 static void update_ip(void)
 {
     esp_netif_ip_info_t ip_info;
@@ -51,6 +56,7 @@ static void event_handler(void *arg, esp_event_base_t base, int32_t event_id, vo
                 networks[network_count++].rssi = records[i].rssi;
             }
         }
+        bump_generation();
     } else if (base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         /* Moonraker consumes this state from another task.  Publish the
          * address before CONNECTED so it cannot open a TCP socket during the
@@ -121,8 +127,12 @@ esp_err_t wifi_manager_scan_start(void)
     if (status.scanning) return ESP_ERR_INVALID_STATE;
     network_count = 0;
     status.scanning = true;
+    bump_generation();
     esp_err_t result = esp_wifi_scan_start(NULL, false);
-    if (result != ESP_OK) status.scanning = false;
+    if (result != ESP_OK) {
+        status.scanning = false;
+        bump_generation();
+    }
     return result;
 }
 
