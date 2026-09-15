@@ -9,4 +9,4 @@ sdkconfig.old
 
 # Device backups are local artifacts and may contain stored credentials
 artifacts/*.bin
-
+.DS_Store
