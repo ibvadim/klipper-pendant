@@ -45,7 +45,7 @@ before soldering, and never apply 5 V to the OpenNextion GPIO inputs.
 
 ## Hardware at a glance
 
-<img width="512" height="512" alt="pendant_loop_24fps_readme_optimized" src="https://github.com/user-attachments/assets/af7ac6af-65a5-4d59-9986-7a4e42f39830" />
+<img width="512" height="512" alt="pendant_loop_20fps_readme_optimized" src="https://github.com/user-attachments/assets/8de863d9-79ec-45a5-949f-10c9ca36876b" />
 
 | Part | Choice used by this project |
 | --- | --- |
