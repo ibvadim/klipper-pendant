@@ -6,6 +6,8 @@ on:
     paths:
       - installer/**
       - .github/workflows/deploy-installer.yml
+  release:
+    types: [published]
   workflow_dispatch:
 
 permissions:
@@ -25,10 +27,21 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # GitHub Release assets do not grant browser CORS access. Copy the complete
+      # installer image into the Pages artifact so the web installer downloads it
+      # from its own origin.
+      - name: Add the latest release installer image
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh release download
+          --repo "$GITHUB_REPOSITORY"
+          --pattern klipper-pendant-onx3248g035-install.bin
+          --dir installer
+          --clobber
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
           path: installer
       - id: deployment
         uses: actions/deploy-pages@v4
-

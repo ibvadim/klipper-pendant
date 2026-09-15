@@ -7,7 +7,7 @@
       "chipFamily": "ESP32-S3",
       "parts": [
         {
-          "path": "https://github.com/ibvadim/klipper-pendant/releases/latest/download/klipper-pendant-onx3248g035-install.bin",
+          "path": "klipper-pendant-onx3248g035-install.bin",
           "offset": 0
         }
       ]
