@@ -17,9 +17,7 @@ No build tools, Git, Python, or ESP-IDF are needed.
 The installer uses the latest published GitHub Release. It is available after
 the first release has been published.
 
-> **First installation replaces the factory firmware.** The E-STOP control
-> sends a request over Wi-Fi to Moonraker; it is not a hard-wired emergency
-> stop.
+> **First installation replaces the factory firmware.** 
 
 ## If the browser installer is unavailable
 

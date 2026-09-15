@@ -11,6 +11,7 @@
 #define SETTINGS_PRINTER_NAME_MAX_LEN 32
 #define SETTINGS_PRINTER_HOST_MAX_LEN 63
 #define SETTINGS_MAX_PRINTERS 16
+#define SETTINGS_BUTTON_GCODE_MAX_LEN 240
 
 typedef struct {
     char ssid[SETTINGS_WIFI_SSID_MAX_LEN + 1];
@@ -29,6 +30,20 @@ typedef enum {
     SETTINGS_THEME_DARK,
 } settings_theme_t;
 
+typedef enum {
+    SETTINGS_BUTTON_ACTION_NONE,
+    SETTINGS_BUTTON_ACTION_BACK,
+    SETTINGS_BUTTON_ACTION_ESTOP,
+    SETTINGS_BUTTON_ACTION_GCODE,
+} settings_button_action_t;
+
+typedef struct {
+    settings_button_action_t left;
+    settings_button_action_t right;
+    char left_gcode[SETTINGS_BUTTON_GCODE_MAX_LEN + 1];
+    char right_gcode[SETTINGS_BUTTON_GCODE_MAX_LEN + 1];
+} settings_button_mapping_t;
+
 esp_err_t settings_init(void);
 esp_err_t settings_get_wifi(settings_wifi_t *wifi);
 esp_err_t settings_set_wifi(const settings_wifi_t *wifi);
@@ -42,6 +57,9 @@ esp_err_t settings_get_active_printer_index(size_t *index);
 esp_err_t settings_set_active_printer_index(size_t index);
 esp_err_t settings_get_theme(settings_theme_t *theme);
 esp_err_t settings_set_theme(settings_theme_t theme);
+esp_err_t settings_get_button_mapping(settings_button_mapping_t *mapping);
+esp_err_t settings_set_button_mapping(const settings_button_mapping_t *mapping);
 
 bool settings_wifi_is_configured(const settings_wifi_t *wifi);
 bool settings_printer_is_valid(const settings_printer_t *printer);
+bool settings_button_mapping_is_valid(const settings_button_mapping_t *mapping);

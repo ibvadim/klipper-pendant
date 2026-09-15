@@ -48,6 +48,7 @@ typedef enum {
     PAGE_DIAGNOSTICS,
     PAGE_BATTERY,
     PAGE_FIRMWARE,
+    PAGE_BUTTON_MAPPING,
 } page_t;
 
 typedef enum {
@@ -57,6 +58,8 @@ typedef enum {
     EDIT_PRINTER_HOST,
     EDIT_PRINTER_PORT,
     EDIT_CONSOLE_COMMAND,
+    EDIT_LEFT_BUTTON_GCODE,
+    EDIT_RIGHT_BUTTON_GCODE,
 } edit_field_t;
 
 typedef enum {
@@ -170,6 +173,11 @@ static page_t current_page;
 static edit_field_t editor_field;
 static settings_wifi_t editable_wifi;
 static settings_printer_t editable_printer;
+static settings_button_mapping_t editable_button_mapping;
+static bool button_mapping_editing;
+static bool button_mapping_edit_left;
+static settings_button_action_t button_mapping_original_action;
+static lv_obj_t *button_mapping_row;
 static settings_printer_t printer_list_snapshot[SETTINGS_MAX_PRINTERS];
 static size_t editing_printer_index = SIZE_MAX;
 /* Capability snapshots are intentionally kept off the small app_main/LVGL
@@ -231,6 +239,8 @@ static void move_step_event(lv_event_t *event);
 static void move_park_event(lv_event_t *event);
 static void move_confirm_event(lv_event_t *event);
 static void move_cancel_event(lv_event_t *event);
+static void emergency_stop_event(lv_event_t *event);
+static void button_mapping_event(lv_event_t *event);
 static void refresh_move_rows(const printer_state_t *printer);
 static void refresh_tune_rows(const printer_state_t *printer);
 static void refresh_pause_action(const printer_state_t *printer);
@@ -389,6 +399,7 @@ static page_t parent_page(page_t page)
     case PAGE_DIAGNOSTICS:
     case PAGE_BATTERY:
     case PAGE_FIRMWARE:
+    case PAGE_BUTTON_MAPPING:
         return PAGE_SETTINGS;
     case PAGE_PRINTER_SETUP:
         return PAGE_PRINTER_LIST;
@@ -1175,6 +1186,7 @@ static void clear_page(void)
     move_extruder_speed_row = NULL;
     move_step_row = NULL;
     move_park_row = NULL;
+    button_mapping_row = NULL;
     tune_value_row = NULL;
     tune_offset_row = NULL;
     tune_speed_row = NULL;
@@ -1562,6 +1574,17 @@ static void editor_save_event(lv_event_t *event)
     case EDIT_CONSOLE_COMMAND:
         strlcpy(console_command, value, sizeof(console_command));
         break;
+    case EDIT_LEFT_BUTTON_GCODE:
+    case EDIT_RIGHT_BUTTON_GCODE:
+        if (settings_get_button_mapping(&editable_button_mapping) != ESP_OK) return;
+        strlcpy(editor_field == EDIT_LEFT_BUTTON_GCODE ? editable_button_mapping.left_gcode :
+                                                        editable_button_mapping.right_gcode,
+                value, SETTINGS_BUTTON_GCODE_MAX_LEN + 1);
+        if (settings_set_button_mapping(&editable_button_mapping) != ESP_OK) {
+            lv_label_set_text(editor_error_label, "Keep one button assigned to Back");
+            return;
+        }
+        break;
     }
     editor_close();
     navigate_to(current_page);
@@ -1592,7 +1615,8 @@ static void hide_keyboard_close_key(lv_obj_t *keyboard)
 static void keyboard_layout_event(lv_event_t *event)
 {
     if (lv_event_get_code(event) == LV_EVENT_VALUE_CHANGED) {
-        if (editor_field != EDIT_CONSOLE_COMMAND) hide_keyboard_close_key(lv_event_get_target(event));
+        if (editor_field != EDIT_CONSOLE_COMMAND && editor_field != EDIT_LEFT_BUTTON_GCODE &&
+            editor_field != EDIT_RIGHT_BUTTON_GCODE) hide_keyboard_close_key(lv_event_get_target(event));
     }
 }
 
@@ -1621,6 +1645,35 @@ static void theme_event(lv_event_t *event)
                                        LV_PART_MAIN | LV_STATE_FOCUSED);
     }
     navigate_to(PAGE_SETTINGS);
+}
+
+static const char *button_action_text(settings_button_action_t action)
+{
+    switch (action) {
+    case SETTINGS_BUTTON_ACTION_BACK: return "Back";
+    case SETTINGS_BUTTON_ACTION_ESTOP: return "E-stop";
+    case SETTINGS_BUTTON_ACTION_GCODE: return "G-code";
+    case SETTINGS_BUTTON_ACTION_NONE:
+    default: return "None";
+    }
+}
+
+static void button_mapping_event(lv_event_t *event)
+{
+    const bool left = (bool)(uintptr_t)lv_event_get_user_data(event);
+    if (settings_get_button_mapping(&editable_button_mapping) != ESP_OK) return;
+    button_mapping_editing = true;
+    button_mapping_edit_left = left;
+    button_mapping_original_action = left ? editable_button_mapping.left : editable_button_mapping.right;
+    button_mapping_row = lv_event_get_target(event);
+    set_inline_row_visual(button_mapping_row, true);
+    lv_label_set_text(back_hint, "Rotate: choose  |  Press: save  |  Back: cancel");
+}
+
+static void emergency_stop_event(lv_event_t *event)
+{
+    (void)event;
+    report_command_result("E-STOP", moonraker_emergency_stop());
 }
 
 static void firmware_check_event(lv_event_t *event)
@@ -1671,6 +1724,15 @@ static void open_editor(edit_field_t field)
         hint = "Send requires HOLD; M112 uses emergency stop";
         max_length = sizeof(console_command) - 1;
         break;
+    case EDIT_LEFT_BUTTON_GCODE:
+    case EDIT_RIGHT_BUTTON_GCODE:
+        if (settings_get_button_mapping(&editable_button_mapping) != ESP_OK) return;
+        title = field == EDIT_LEFT_BUTTON_GCODE ? "Left button G-code" : "Right button G-code";
+        value = field == EDIT_LEFT_BUTTON_GCODE ? editable_button_mapping.left_gcode :
+                                                  editable_button_mapping.right_gcode;
+        hint = "Runs when the button is held";
+        max_length = SETTINGS_BUTTON_GCODE_MAX_LEN;
+        break;
     }
     editor_overlay = lv_obj_create(lv_layer_top());
     lv_obj_set_size(editor_overlay, 320, 480);
@@ -1683,15 +1745,17 @@ static void open_editor(edit_field_t field)
     lv_label_set_text(label, title);
     lv_obj_set_style_text_font(label, &lv_font_montserrat_18, LV_PART_MAIN);
     lv_obj_set_style_text_color(label, ui_kit_color(UI_COLOR_TEXT_PRIMARY), LV_PART_MAIN);
-    if (field != EDIT_CONSOLE_COMMAND) {
+    if (field != EDIT_CONSOLE_COMMAND && field != EDIT_LEFT_BUTTON_GCODE && field != EDIT_RIGHT_BUTTON_GCODE) {
         lv_obj_t *hint_label = lv_label_create(editor_overlay);
         lv_label_set_text(hint_label, hint);
         lv_obj_set_style_text_color(hint_label, ui_kit_color(UI_COLOR_TEXT_MUTED), LV_PART_MAIN);
     }
     editor_textarea = lv_textarea_create(editor_overlay);
     lv_obj_set_width(editor_textarea, LV_PCT(100));
-    lv_obj_set_height(editor_textarea, field == EDIT_CONSOLE_COMMAND ? 76 : 46);
-    lv_textarea_set_one_line(editor_textarea, field != EDIT_CONSOLE_COMMAND);
+    const bool multiline = field == EDIT_CONSOLE_COMMAND || field == EDIT_LEFT_BUTTON_GCODE ||
+                           field == EDIT_RIGHT_BUTTON_GCODE;
+    lv_obj_set_height(editor_textarea, multiline ? 76 : 46);
+    lv_textarea_set_one_line(editor_textarea, !multiline);
     lv_textarea_set_cursor_click_pos(editor_textarea, true);
     lv_textarea_set_max_length(editor_textarea, max_length);
     lv_textarea_set_text(editor_textarea, value);
@@ -1731,7 +1795,7 @@ static void open_editor(edit_field_t field)
     lv_obj_set_style_border_color(keyboard, ui_kit_color(UI_COLOR_BORDER), LV_PART_ITEMS);
     lv_obj_set_style_text_color(keyboard, ui_kit_color(UI_COLOR_TEXT_PRIMARY), LV_PART_ITEMS);
     if (field == EDIT_PRINTER_PORT) lv_keyboard_set_mode(keyboard, LV_KEYBOARD_MODE_NUMBER);
-    if (field == EDIT_CONSOLE_COMMAND) {
+    if (field == EDIT_CONSOLE_COMMAND || field == EDIT_LEFT_BUTTON_GCODE || field == EDIT_RIGHT_BUTTON_GCODE) {
         lv_keyboard_set_map(keyboard, LV_KEYBOARD_MODE_TEXT_LOWER, console_kb_lower, console_kb_ctrl);
         lv_keyboard_set_map(keyboard, LV_KEYBOARD_MODE_TEXT_UPPER, console_kb_upper, console_kb_ctrl);
         lv_keyboard_set_map(keyboard, LV_KEYBOARD_MODE_SPECIAL, console_kb_special, console_kb_ctrl);
@@ -1739,7 +1803,8 @@ static void open_editor(edit_field_t field)
     }
     lv_keyboard_set_textarea(keyboard, editor_textarea);
     lv_obj_add_event_cb(keyboard, keyboard_layout_event, LV_EVENT_VALUE_CHANGED, NULL);
-    if (field != EDIT_CONSOLE_COMMAND) hide_keyboard_close_key(keyboard);
+    if (field != EDIT_CONSOLE_COMMAND && field != EDIT_LEFT_BUTTON_GCODE && field != EDIT_RIGHT_BUTTON_GCODE)
+        hide_keyboard_close_key(keyboard);
     lv_group_focus_obj(keyboard);
 }
 
@@ -3038,6 +3103,7 @@ static void navigate_to(page_t page)
         const bool available = move_commands_available();
         lv_label_set_text(page_title, "");
         lv_label_set_text(back_hint, "Hold = move/apply  |  Back = Monitor");
+        add_nav_hold_row("E-STOP", "HOLD", UI_TONE_DANGER, emergency_stop_event, NULL);
         move_position_section = ui_kit_create_section(page_body, "POSITION (mm)");
         for (uint8_t axis = 0; axis < 3; ++axis) {
             char title[32];
@@ -3515,6 +3581,8 @@ static void navigate_to(page_t page)
         settings_get_theme(&theme);
         add_nav_row("Theme", theme == SETTINGS_THEME_DARK ? "Dark" : "Light",
                     UI_TONE_ACCENT, true, theme_event, NULL);
+        add_nav_row("Button mapping", NULL, UI_TONE_DEFAULT, true,
+                    navigation_event, (void *)PAGE_BUTTON_MAPPING);
         add_nav_row("Battery", "Live debug", UI_TONE_DEFAULT, true,
                     navigation_event, (void *)PAGE_BATTERY);
         add_nav_row("Firmware", NULL, UI_TONE_DEFAULT, true,
@@ -3522,6 +3590,35 @@ static void navigate_to(page_t page)
         ui_kit_create_section(page_body, "SYSTEM");
         add_nav_row("Diagnostics", NULL, UI_TONE_DEFAULT, true,
                     navigation_event, (void *)PAGE_DIAGNOSTICS);
+        break;
+    }
+    case PAGE_BUTTON_MAPPING:
+    {
+        lv_label_set_text(page_title, "Button mapping");
+        lv_label_set_text(back_hint, "Tap to change  |  Keep one Back button");
+        if (settings_get_button_mapping(&editable_button_mapping) != ESP_OK) break;
+        ui_kit_create_section(page_body, "PHYSICAL BUTTONS");
+        lv_obj_t *left_row = add_nav_row("Left button", button_action_text(editable_button_mapping.left),
+                                         UI_TONE_ACCENT, true, button_mapping_event,
+                                         (void *)(uintptr_t)1);
+        lv_obj_t *right_row = add_nav_row("Right button", button_action_text(editable_button_mapping.right),
+                                          UI_TONE_ACCENT, true, button_mapping_event, (void *)false);
+        if (button_mapping_editing) {
+            button_mapping_row = button_mapping_edit_left ? left_row : right_row;
+            set_inline_row_visual(button_mapping_row, true);
+            lv_label_set_text(back_hint, "Rotate: choose  |  Press: save  |  Back: cancel");
+        }
+        if (editable_button_mapping.left == SETTINGS_BUTTON_ACTION_GCODE)
+            add_nav_row("Set G-code", editable_button_mapping.left_gcode[0] ? "EDIT" : "SET",
+                        UI_TONE_WARNING, true, edit_field_event, (void *)EDIT_LEFT_BUTTON_GCODE);
+        if (editable_button_mapping.right == SETTINGS_BUTTON_ACTION_GCODE)
+            add_nav_row("Set G-code", editable_button_mapping.right_gcode[0] ? "EDIT" : "SET",
+                        UI_TONE_WARNING, true, edit_field_event, (void *)EDIT_RIGHT_BUTTON_GCODE);
+        ui_kit_create_section(page_body, "ACTIONS");
+        add_nav_row("None", "Disabled", UI_TONE_MUTED, false, NULL, NULL);
+        add_nav_row("Back", "Go back", UI_TONE_DEFAULT, false, NULL, NULL);
+        add_nav_row("E-stop", "Hold to send", UI_TONE_DANGER, false, NULL, NULL);
+        add_nav_row("G-code", "Hold to run", UI_TONE_WARNING, false, NULL, NULL);
         break;
     }
     case PAGE_PRINTER_LIST:
@@ -3861,6 +3958,7 @@ esp_err_t pendant_ui_init(void)
 
 static void handle_input_locked(const pendant_input_event_t *event)
 {
+    pendant_input_event_t mapped_event;
     /* Flash writes and signature verification must run without a competing
      * navigation or printer action.  The update page remains informational
      * and is refreshed by the regular UI timer. */
@@ -3869,6 +3967,27 @@ static void handle_input_locked(const pendant_input_event_t *event)
         ota_update_status_t update;
         ota_update_get_status(&update);
         if (update.state == OTA_UPDATE_CHECKING) return;
+    }
+    if (event->type == PENDANT_INPUT_LEFT || event->type == PENDANT_INPUT_LEFT_HOLD ||
+        event->type == PENDANT_INPUT_RIGHT || event->type == PENDANT_INPUT_RIGHT_HOLD) {
+        settings_button_mapping_t mapping;
+        if (settings_get_button_mapping(&mapping) != ESP_OK) return;
+        const bool left = event->type == PENDANT_INPUT_LEFT || event->type == PENDANT_INPUT_LEFT_HOLD;
+        const bool held = event->type == PENDANT_INPUT_LEFT_HOLD || event->type == PENDANT_INPUT_RIGHT_HOLD;
+        const settings_button_action_t action = left ? mapping.left : mapping.right;
+        if (action == SETTINGS_BUTTON_ACTION_NONE) return;
+        if (action == SETTINGS_BUTTON_ACTION_GCODE) {
+            const char *script = left ? mapping.left_gcode : mapping.right_gcode;
+            if (held && script[0] != '\0' && is_printer_page(current_page))
+                report_command_result("Button G-code", moonraker_send_gcode(script));
+            return;
+        }
+        mapped_event = *event;
+        if (action == SETTINGS_BUTTON_ACTION_BACK)
+            mapped_event.type = held ? PENDANT_INPUT_BACK_HOLD : PENDANT_INPUT_BACK;
+        else
+            mapped_event.type = held ? PENDANT_INPUT_ESTOP_HOLD : PENDANT_INPUT_ESTOP;
+        event = &mapped_event;
     }
     if (event->type == PENDANT_INPUT_BACK_HOLD) {
         /* A modal editor belongs to the current page, not to Fleet.  Close it
@@ -3886,6 +4005,32 @@ static void handle_input_locked(const pendant_input_event_t *event)
         return;
     }
     if (event->type == PENDANT_INPUT_ESTOP) return;
+    if (current_page == PAGE_BUTTON_MAPPING && button_mapping_editing) {
+        settings_button_action_t *action = button_mapping_edit_left ?
+            &editable_button_mapping.left : &editable_button_mapping.right;
+        if (event->type == PENDANT_INPUT_ENCODER_ROTATE) {
+            const int count = SETTINGS_BUTTON_ACTION_GCODE + 1;
+            *action = (settings_button_action_t)((*action + count + event->delta) % count);
+            if (button_mapping_row != NULL) {
+                ui_kit_set_row_text(button_mapping_row,
+                                    button_mapping_edit_left ? "Left button" : "Right button",
+                                    button_action_text(*action));
+            }
+        } else if (event->type == PENDANT_INPUT_ENCODER_PRESS ||
+                   event->type == PENDANT_INPUT_ENCODER_HOLD) {
+            if (settings_set_button_mapping(&editable_button_mapping) != ESP_OK) {
+                report_command_result("Keep one Back button", ESP_FAIL);
+                return;
+            }
+            button_mapping_editing = false;
+            navigate_to(PAGE_BUTTON_MAPPING);
+        } else if (event->type == PENDANT_INPUT_BACK) {
+            *action = button_mapping_original_action;
+            button_mapping_editing = false;
+            navigate_to(PAGE_BUTTON_MAPPING);
+        }
+        return;
+    }
     /* Down/up remain available for a future feedback layer. */
     if (event->type == PENDANT_INPUT_ENCODER_DOWN) return;
     if (current_page == PAGE_TUNE && tune_mode != TUNE_MODE_BROWSE) {

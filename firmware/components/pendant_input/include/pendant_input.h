@@ -11,6 +11,12 @@ typedef enum {
     /* A completed short press, emitted only after release without a hold. */
     PENDANT_INPUT_ENCODER_PRESS,
     PENDANT_INPUT_ENCODER_HOLD,
+    /* Physical auxiliary buttons. Their actions are assigned in Settings. */
+    PENDANT_INPUT_LEFT,
+    PENDANT_INPUT_LEFT_HOLD,
+    PENDANT_INPUT_RIGHT,
+    PENDANT_INPUT_RIGHT_HOLD,
+    /* UI-normalized actions; never emitted by the input driver. */
     PENDANT_INPUT_BACK,
     PENDANT_INPUT_BACK_HOLD,
     PENDANT_INPUT_ESTOP,

@@ -32,6 +32,7 @@ Export the individual bodies for your slicer. The intended print set is:
 - buttons — 2
 - power-toggle fork — 1
 - power-toggle switch — 1
+- knob - 1
 
 Starting settings used for the prototype: PLA, 2 perimeters, 3 top and bottom
 layers, and 15% infill. A well-calibrated printer is important: the enclosure

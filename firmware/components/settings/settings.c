@@ -12,6 +12,7 @@
 #define SETTINGS_PRINTER_KEY "printer"
 #define SETTINGS_PRINTERS_KEY "printers"
 #define SETTINGS_THEME_KEY "theme"
+#define SETTINGS_BUTTON_MAPPING_KEY "button_map"
 
 typedef struct {
     uint8_t count;
@@ -103,6 +104,44 @@ esp_err_t settings_set_theme(settings_theme_t theme)
     if (result == ESP_OK) result = nvs_commit(handle);
     if (result == ESP_OK || handle) nvs_close(handle);
     return result;
+}
+
+bool settings_button_mapping_is_valid(const settings_button_mapping_t *mapping)
+{
+    if (mapping == NULL ||
+        (unsigned)mapping->left > SETTINGS_BUTTON_ACTION_GCODE ||
+        (unsigned)mapping->right > SETTINGS_BUTTON_ACTION_GCODE ||
+        strnlen(mapping->left_gcode, sizeof(mapping->left_gcode)) == sizeof(mapping->left_gcode) ||
+        strnlen(mapping->right_gcode, sizeof(mapping->right_gcode)) == sizeof(mapping->right_gcode)) {
+        return false;
+    }
+    /* Back is the only physical way out of every screen, including Settings. */
+    return mapping->left == SETTINGS_BUTTON_ACTION_BACK ||
+           mapping->right == SETTINGS_BUTTON_ACTION_BACK;
+}
+
+esp_err_t settings_get_button_mapping(settings_button_mapping_t *mapping)
+{
+    if (mapping == NULL) return ESP_ERR_INVALID_ARG;
+    *mapping = (settings_button_mapping_t){
+        .left = SETTINGS_BUTTON_ACTION_BACK,
+        .right = SETTINGS_BUTTON_ACTION_ESTOP,
+    };
+    esp_err_t result = get_blob(SETTINGS_BUTTON_MAPPING_KEY, mapping, sizeof(*mapping));
+    /* A damaged or old blob must never leave the pendant without Back. */
+    if (result != ESP_OK || !settings_button_mapping_is_valid(mapping)) {
+        *mapping = (settings_button_mapping_t){
+            .left = SETTINGS_BUTTON_ACTION_BACK,
+            .right = SETTINGS_BUTTON_ACTION_ESTOP,
+        };
+    }
+    return ESP_OK;
+}
+
+esp_err_t settings_set_button_mapping(const settings_button_mapping_t *mapping)
+{
+    if (!settings_button_mapping_is_valid(mapping)) return ESP_ERR_INVALID_ARG;
+    return set_blob(SETTINGS_BUTTON_MAPPING_KEY, mapping, sizeof(*mapping));
 }
 
 esp_err_t settings_get_wifi(settings_wifi_t *wifi)

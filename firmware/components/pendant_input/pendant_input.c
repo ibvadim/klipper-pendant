@@ -107,16 +107,17 @@ static void poll_button(button_state_t *button)
         if (button->stable_pressed) {
             button->pressed_at = xTaskGetTickCount();
             button->hold_reported = false;
-            /* Encoder needs its down edge for hold-progress feedback.  Back
-             * deliberately waits for release, so a Back-hold cannot also
-             * navigate one level before it enters Fleet. */
+            /* Encoder needs its down edge for hold-progress feedback. The
+             * auxiliary buttons deliberately wait for release, so their
+             * short action cannot also run after a hold action. */
             if (button->type == PENDANT_INPUT_ENCODER_PRESS) {
                 emit_event(PENDANT_INPUT_ENCODER_DOWN, 0, true);
             }
         } else if (button->type == PENDANT_INPUT_ENCODER_PRESS) {
             emit_event(PENDANT_INPUT_ENCODER_DOWN, 0, false);
             if (!button->hold_reported) emit_event(PENDANT_INPUT_ENCODER_PRESS, 0, true);
-        } else if (button->type == PENDANT_INPUT_BACK && !button->hold_reported) {
+        } else if ((button->type == PENDANT_INPUT_LEFT || button->type == PENDANT_INPUT_RIGHT) &&
+                   !button->hold_reported) {
             emit_event(button->type, 0, true);
         }
     }
@@ -129,8 +130,8 @@ static void poll_button(button_state_t *button)
         xTaskGetTickCount() - button->pressed_at >= pdMS_TO_TICKS(ENCODER_HOLD_MS)) {
         button->hold_reported = true;
         const pendant_input_type_t hold_type = button->type == PENDANT_INPUT_ENCODER_PRESS ?
-            PENDANT_INPUT_ENCODER_HOLD : button->type == PENDANT_INPUT_BACK ?
-            PENDANT_INPUT_BACK_HOLD : PENDANT_INPUT_ESTOP_HOLD;
+            PENDANT_INPUT_ENCODER_HOLD : button->type == PENDANT_INPUT_LEFT ?
+            PENDANT_INPUT_LEFT_HOLD : PENDANT_INPUT_RIGHT_HOLD;
         emit_event(hold_type, 0, true);
     }
 }
@@ -186,8 +187,8 @@ esp_err_t pendant_input_init(pendant_input_callback_t callback, void *context)
     input_context.encoder_state = (gpio_get_level(PENDANT_ENCODER_CLK_GPIO) << 1) |
                                   gpio_get_level(PENDANT_ENCODER_DT_GPIO);
     input_context.buttons[0] = (button_state_t){ .gpio = PENDANT_ENCODER_SW_GPIO, .type = PENDANT_INPUT_ENCODER_PRESS };
-    input_context.buttons[1] = (button_state_t){ .gpio = PENDANT_BACK_GPIO, .type = PENDANT_INPUT_BACK };
-    input_context.buttons[2] = (button_state_t){ .gpio = PENDANT_ESTOP_GPIO, .type = PENDANT_INPUT_ESTOP };
+    input_context.buttons[1] = (button_state_t){ .gpio = PENDANT_BACK_GPIO, .type = PENDANT_INPUT_LEFT };
+    input_context.buttons[2] = (button_state_t){ .gpio = PENDANT_ESTOP_GPIO, .type = PENDANT_INPUT_RIGHT };
 
     encoder_queue = xQueueCreate(ENCODER_QUEUE_LENGTH, sizeof(uint8_t));
     if (encoder_queue == NULL) {
